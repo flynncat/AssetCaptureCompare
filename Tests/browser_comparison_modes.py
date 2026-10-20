@@ -28,6 +28,23 @@ with sync_playwright() as playwright:
     page.on("pageerror", lambda error: errors.append(str(error)))
     for viewport in ({"width": 1440, "height": 1000}, {"width": 390, "height": 844}):
         page.set_viewport_size(viewport)
+        page.goto(url)
+        expect(page.locator("#right-image")).to_be_visible()
+        expect(page.locator('[data-mode="side"]')).to_have_attribute("aria-pressed", "true")
+        for mode in ("slider", "diff", "heat", "side"):
+            button = page.locator(f'[data-mode="{mode}"]')
+            button.click()
+            expect(page.locator('#modes button[aria-pressed="true"]')).to_have_count(1)
+            expect(page.locator("#modes button.active")).to_have_count(1)
+            expect(button).to_have_attribute("aria-pressed", "true")
+            colors = button.evaluate("element => [getComputedStyle(element).backgroundColor, getComputedStyle(element).color]")
+            other = page.locator('#modes button[aria-pressed="false"]').first
+            assert colors[0] != other.evaluate("element => getComputedStyle(element).backgroundColor"), "Hover must retain a distinct selected background"
+            button.hover()
+            assert button.evaluate("element => [getComputedStyle(element).backgroundColor, getComputedStyle(element).color]") == colors
+            page.mouse.move(1, 1)
+            assert button.evaluate("element => [getComputedStyle(element).backgroundColor, getComputedStyle(element).color]") == colors, "Selected styling must persist after mouse exit"
+        page.locator(".view-toolbar").screenshot(path=str(artifacts / f"mode-selection-{viewport['width']}.png"))
         for first_mode in ("diff", "heat"):
             page.goto(url)
             expect(page.locator("#right-image")).to_be_visible()

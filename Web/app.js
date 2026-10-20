@@ -143,6 +143,11 @@ function viewFile(capture) { const view = $("view").value; return capture?.statu
 function setImage(id, url) { const image = $(id); image.hidden = !url; if (url) { image.src = url; image.onerror = () => { image.hidden = true; notice("图片缺失或已删除", true); }; } else image.removeAttribute("src"); }
 function renderImages() {
   const left = viewFile(state.left), right = viewFile(state.right), mode = state.mode, c = state.comparison;
+  for (const button of $("modes").querySelectorAll("button")) {
+    const selected = button.dataset.mode === mode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  }
   const single = mode !== "side"; $("image-stage").classList.toggle("single", single); $("image-stage").classList.toggle("sheet", $("view").value === "sheet");
   setImage("left-image", left); setImage("right-image", right);
   $("image-stage").querySelector(".slider-stage").hidden = !single; $("split-divider").hidden = mode !== "slider";
@@ -167,7 +172,7 @@ for (const id of ["left-image", "right-image"]) $(id).ondblclick = event => {
   const view = capture.views[Math.floor(y / batch.profile.size) * batch.profile.columns + Math.floor(x / batch.profile.size)];
   if (view) { $("view").value = view.id; $("view").onchange(); }
 };
-document.querySelectorAll("[data-mode]").forEach(e => e.onclick = () => safe(async () => { state.mode = e.dataset.mode; document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === e)); renderImages(); if (["diff", "heat"].includes(state.mode) && !state.comparison) await calculateComparison(); }));
+document.querySelectorAll("[data-mode]").forEach(e => e.onclick = () => safe(async () => { state.mode = e.dataset.mode; renderImages(); if (["diff", "heat"].includes(state.mode) && !state.comparison) await calculateComparison(); }));
 function updateSplit(value) {
   state.split = Math.max(0, Math.min(100, value));
   $("slider-clip").style.clipPath = `inset(0 0 0 ${state.split}%)`;

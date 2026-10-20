@@ -69,7 +69,7 @@ progress { width: 100%; height: 10px; accent-color: #13766e; }
 .segmented button { border-radius: 0; margin-left: -1px; }
 .segmented button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
 .segmented button:last-child { border-radius: 0 4px 4px 0; }
-.segmented .active { background: #e3eeeb; border-color: #91afa5; z-index: 1; }
+.segmented button.active, .segmented button.active:hover:not(:disabled) { color: #fff; background: #13766e; border-color: #13766e; z-index: 1; }
 .image-labels { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; font-size: 12px; color: #707b83; margin-bottom: 8px; overflow-wrap: anywhere; }
 .image-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; min-height: 280px; background: #e5e8eb; overflow: hidden; border: 1px solid #d4dadd; }
 .image-pane { display: flex; align-items: center; justify-content: center; overflow: hidden; min-width: 0; aspect-ratio: 1 / 1; background: #1c1e21; touch-action: none; cursor: grab; }
