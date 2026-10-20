@@ -5,7 +5,7 @@ const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches:
 const labels = { success: "成功", partial: "部分成功", failed: "失败", incomplete: "部分视角无法评分", running: "运行中", cancelled: "已取消", interrupted: "已中断", no_baseline: "无历史基线", incompatible: "配置不兼容", small: "差异较小", review: "建议检查", changed: "差异明显" };
 const viewNames = { front: "正面", front_right: "前斜面", right: "右侧", back: "背面", left: "左侧", back_right: "后斜面", top: "俯视", bottom: "仰视" };
 function workerPhase(worker) {
-  const names = { starting: "启动子编辑器", idle: "空闲", loading_world: "加载采集场景", loading_asset: "加载资产", settling_bounds: "更新包围盒", waiting_resources: "等待纹理及 Shader", cleaning: "清理资产" };
+  const names = { starting: "启动子编辑器", idle: "空闲", loading_world: "加载采集场景", loading_asset: "加载资产", settling_bounds: "更新包围盒", waiting_resources: "等待纹理及 Shader", cleaning: "清理资产", processing_images: "处理图片及发布结果" };
   const phase = worker.phase || "starting";
   const match = phase.match(/^(warming|capturing|writing)_(.+)$/);
   return (match ? ({ warming: "额外渲染", capturing: "采集", writing: "导出" }[match[1]] + " · " + (viewNames[match[2]] || match[2])) : names[phase] || phase) +
@@ -40,7 +40,7 @@ async function loadAssets(action) { notice(""); const value = await api("/api/ed
 $("selection").onclick = () => safe(() => loadAssets("selection")); $("scan").onclick = () => safe(() => loadAssets("scan"));
 function profile() { return { size: Number($("size").value), columns: Number($("columns").value), fov: Number($("fov").value), padding: Number($("padding").value), orientation: Number($("orientation").value), warmup_frames: Number($("warmup_frames").value), worker_memory_gib: Number($("worker_memory_gib").value), scene: $("scene").value, hide_floor: $("hide_floor").checked, reframe: $("reframe").checked }; }
 $("capture-form").onsubmit = event => { event.preventDefault(); safe(async () => { if (!state.selected.size) throw new Error("请选择需要采集的资产"); $("capture-start").disabled = true; try { const value = await api("/api/capture", { paths: [...state.selected], profile: profile(), concurrency: Number($("concurrency").value), label: $("label").value }); notice("采集任务已创建：" + value.batch_id); await refresh(); } finally { $("capture-start").disabled = state.running; } }); };
-$("capture-cancel").onclick = () => safe(async () => { await api("/api/cancel", {}); notice("正在取消任务"); });
+$("capture-cancel").onclick = () => safe(async () => { await api("/api/cancel", {}); notice("正在停止采集并保留已完成结果"); });
 $("output-save").onclick = () => safe(async () => { await api("/api/output", { root: $("output-root").value }); await refresh(); });
 $("reveal").onclick = () => safe(() => api("/api/reveal", {}));
 function options(select, values, selected) { select.replaceChildren(...values.map(v => { const option = text("option", v.label); option.value = v.value; return option; })); if (values.some(v => v.value === selected)) select.value = selected; }
@@ -180,16 +180,18 @@ function renderBatches() {
 $("batch-search").oninput = () => { state.batchPage = 0; renderBatches(); }; for (const id of ["batch-status", "result-filter", "result-sort"]) $(id).onchange = () => { state.batchPage = 0; renderBatches(); };
 $("batch-prev").onclick = () => { state.batchPage--; renderBatches(); }; $("batch-next").onclick = () => { state.batchPage++; renderBatches(); };
 async function poll() {
-  const value = await api("/api/progress"); const wasRunning = state.running; state.running = value.running; $("capture-start").disabled = state.running || state.calibration; $("capture-cancel").disabled = !state.running;
+  const value = await api("/api/progress?summary=1"); const wasRunning = state.running; state.running = value.running || Boolean(value.preparation); $("capture-start").disabled = state.running || state.calibration; $("capture-cancel").disabled = !state.running || value.cancelling;
   $("worker-list").replaceChildren();
-  if (value.running) { const completed = value.batch.assets.filter(a => ["success", "failed", "cancelled"].includes(a.status)).length; $("progress").max = value.batch.assets.length; $("progress").value = completed; $("progress-summary").textContent = `${completed}/${value.batch.assets.length} · ${Math.round(value.elapsed_seconds || 0)}s`; for (const worker of value.workers || []) $("worker-list").append(text("div", `Worker ${worker.index + 1} · ${workerPhase(worker)} · ${worker.path || ""}`)); }
-  else if (wasRunning) { $("progress-summary").textContent = "任务结束"; await refresh(); }
+  if (value.preparation) { const p = value.preparation; const names = { dependencies: "检查资产依赖", baselines: "查找历史基线", scene: "检查采集场景" }; $("progress").max = p.total || 1; $("progress").value = p.completed; $("progress-summary").textContent = `${value.cancelling ? "正在取消" : names[p.phase] || p.phase} · ${p.completed}/${p.total} · ${Math.round(p.elapsed_seconds)}s`; }
+  else if (value.running) { $("progress").max = value.total; $("progress").value = value.completed; $("progress-summary").textContent = `${value.cancelling ? "正在取消 · " : value.phase === "finalizing" ? "正在收尾 · " : ""}${value.completed}/${value.total} · ${Math.round(value.elapsed_seconds || 0)}s`; for (const worker of value.workers || []) $("worker-list").append(text("div", `Worker ${worker.index + 1} · ${workerPhase(worker)} · ${worker.path || ""}`)); }
+  else if (wasRunning) { $("progress-summary").textContent = "任务结束"; notice("任务已结束，已完成结果已保留"); await refresh(); }
   const calibration = await api("/api/calibration"); const wasCalibrating = state.calibration; state.calibration = calibration.running; $("calibration-state").textContent = calibration.result?.error || calibration.phase || ""; $("calibrate").disabled = state.running || state.calibration; $("calibrate-cancel").hidden = !state.calibration; $("capture-start").disabled = state.running || state.calibration;
   if (wasCalibrating && !state.calibration && calibration.result?.recommended) $("concurrency").value = calibration.result.recommended;
   if (calibration.result) renderCalibration(calibration.result);
 }
 function renderCalibration(result) {
   $("calibration-results").replaceChildren();
+  if (result.sample_count) $("calibration-results").append(text("p", `本次样本 ${result.sample_count} / 所选 ${result.selection_count} 个资产`, "muted"));
   for (const row of result.results || []) $("calibration-results").append(text("p", `${row.concurrency} 并发 · ${row.median_seconds.toFixed(1)}s · ${row.speedup.toFixed(2)}× · ${row.stable ? "稳定" : "不稳定"}`));
   if (result.resource_limit) $("calibration-results").append(text("p", result.resource_limit, "muted"));
   if (result.status === "success" && result.meets_speedup_target === false) $("calibration-results").append(text("p", "实测未达到 1.3× 参考提速目标", "muted"));
@@ -212,6 +214,6 @@ async function init() {
   if (value.calibration) renderCalibration(value.calibration);
   await refresh();
   const query = new URLSearchParams(location.search); if (query.has("right")) { tab("compare"); $("use-baseline").checked = false; for (const side of ["left", "right"]) { const id = query.get(side); if (id) { $(side + "-batch").value = id.split("/")[0]; assetOptions(side, id); } } await loadPair(); $("view").value = query.get("view") || "sheet"; renderImages(); }
-  await poll(); setInterval(() => safe(poll), 1500);
+  const schedulePoll = async () => { try { await safe(poll); } finally { setTimeout(schedulePoll, 1500); } }; await schedulePoll();
 }
 safe(init);

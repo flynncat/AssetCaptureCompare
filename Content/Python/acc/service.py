@@ -46,6 +46,8 @@ class Application:
         self.shutdown_callback = None
         self.operation_lock = threading.RLock()
         self.shutting_down = False
+        self.preparation = None
+        self.preparation_cancelled = threading.Event()
         self.output_lock = lock_output(root)
         self.store = Store(root)
         self.scheduler = Scheduler(self.store)
@@ -72,7 +74,7 @@ class Application:
         state["connected"] = time.time() - state.get("heartbeat", 0) < 6
         return state
 
-    def editor(self, action, **data):
+    def editor(self, action, cancel_event=None, **data):
         state = self.editor_state()
         if not state["connected"]:
             raise ValueError("Editor is disconnected. Open the plugin from Unreal to capture assets.")
@@ -82,8 +84,15 @@ class Application:
         response_path = self.bridge / "responses" / request_path.name
         write_json(request_path, request)
         try:
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
+                if cancel_event and cancel_event.is_set():
+                    request_path.with_suffix(".cancel").touch()
+                    raise InterruptedError("Capture cancelled during preparation")
+                if action == "prepare":
+                    progress = read_json(request_path.with_suffix(".progress"))
+                    if progress and self.preparation:
+                        self.preparation.update(progress)
                 response = read_json(response_path)
                 if response:
                     if not response["ok"]:
@@ -92,7 +101,7 @@ class Application:
                 time.sleep(0.1)
             raise TimeoutError("Editor operation timed out")
         finally:
-            for path in (request_path, response_path):
+            for path in (request_path, response_path, request_path.with_suffix(".progress")):
                 try:
                     path.unlink()
                 except FileNotFoundError:
@@ -106,16 +115,12 @@ class Application:
             return {"settings": self.settings, "machine": self.machine, "editor": self.editor_state(),
                     "root": str(self.store.root), "calibration": read_json(self.store.root / "calibration.json")}
         if route == "/api/batches":
-            batches = self.store.rebuild()
-            for batch in batches:
-                for asset in batch["assets"]:
-                    asset.pop("files", None)
-            return {"batches": batches}
+            return {"batches": self.store.listing()}
         if route == "/api/progress":
-            value = self.scheduler.progress()
-            if value.get("batch"):
-                for asset in value["batch"]["assets"]:
-                    asset.pop("files", None)
+            value = self.scheduler.progress(summary=query.get("summary") == ["1"])
+            if self.preparation:
+                value.update(preparation=dict(self.preparation, elapsed_seconds=time.monotonic() - self.preparation["started"]),
+                             cancelling=self.preparation_cancelled.is_set())
             return value
         if route == "/api/calibration":
             return {"running": self.calibration.running, "phase": self.calibration.phase, "result": self.calibration.result}
@@ -130,6 +135,11 @@ class Application:
         raise FileNotFoundError("Unknown endpoint")
 
     def post(self, route, data):
+        # Cancellation must not queue behind a prepare, compare or filesystem operation.
+        if route in ("/api/cancel", "/api/calibrate/cancel"):
+            self.preparation_cancelled.set()
+            self.calibration.cancel()
+            return {"ok": True}
         with self.operation_lock:
             if self.shutting_down:
                 raise ValueError("The viewer is shutting down; reopen it from Unreal")
@@ -158,8 +168,13 @@ class Application:
             from .common import validate_profile
             validate_profile(profile)
             count = data.get("concurrency", self.settings["concurrency"])
-            prepared = self.editor("prepare", paths=data["paths"], scene=profile["scene"])
-            batch = self.scheduler.start(prepared, profile, count, data.get("label", ""), data.get("retry_of"))
+            self.begin_preparation(len(data["paths"]))
+            try:
+                prepared = self.editor("prepare", cancel_event=self.preparation_cancelled, paths=data["paths"], scene=profile["scene"])
+                batch = self.scheduler.start(prepared, profile, count, data.get("label", ""), data.get("retry_of"),
+                                             self.preparation_cancelled, self.preparation_progress)
+            finally:
+                self.preparation = None
             self.settings.update(concurrency=count, profile=profile)
             write_json(self.settings_file, self.settings)
             return {"batch_id": batch["batch_id"]}
@@ -182,8 +197,15 @@ class Application:
             profile["renderer"] = DEFAULT_PROFILE["renderer"]
             from .common import validate_profile
             validate_profile(profile)
-            prepared = self.editor("prepare", paths=data["paths"], scene=profile["scene"])
-            self.calibration.start(prepared, profile, data.get("max_workers", 4))
+            self.begin_preparation(len(data["paths"]))
+            try:
+                prepared = self.editor("prepare", cancel_event=self.preparation_cancelled, paths=data["paths"],
+                                       scene=profile["scene"], sample_limit=50)
+                if self.preparation_cancelled.is_set():
+                    raise InterruptedError("Calibration cancelled during preparation")
+                self.calibration.start(prepared, profile, data.get("max_workers", 4), self.preparation_cancelled)
+            finally:
+                self.preparation = None
             return {"ok": True}
         if route == "/api/calibrate/cancel":
             self.calibration.cancel()
@@ -221,6 +243,14 @@ class Application:
             os.startfile(str(path))
             return {"ok": True}
         raise FileNotFoundError("Unknown endpoint")
+
+    def begin_preparation(self, total):
+        self.preparation_cancelled.clear()
+        self.preparation = {"phase": "dependencies", "completed": 0, "total": total, "started": time.monotonic()}
+
+    def preparation_progress(self, phase, completed, total):
+        if self.preparation:
+            self.preparation.update(phase=phase, completed=completed, total=total)
 
 
 def make_handler(application):

@@ -69,10 +69,12 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def file_hash(path):
+def file_hash(path, cancel_event=None):
     hasher = hashlib.sha256()
     with open(str(path), "rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Capture cancelled while hashing source files")
             hasher.update(block)
     return hasher.hexdigest()
 
@@ -123,6 +125,26 @@ def validate_profile(profile):
 def re_safe_id(value):
     import re
     return bool(re.fullmatch(r"[A-Za-z0-9_-]+", str(value)))
+
+
+def representative_assets(assets, limit=50):
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("Sample limit must be a positive integer")
+    if len(assets) <= limit:
+        return list(assets)
+    groups = {}
+    for asset in sorted(assets, key=lambda a: a["path"]):
+        groups.setdefault(asset["class"], []).append(asset)
+    selected = [group[len(group) // 2] for group in groups.values()][:limit]
+    if len(selected) == limit:
+        return selected
+    for index in range(limit):
+        asset = assets[index * len(assets) // limit]
+        if asset not in selected:
+            selected.append(asset)
+        if len(selected) == limit:
+            break
+    return selected
 
 
 def contained(root, relative):

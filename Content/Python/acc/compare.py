@@ -29,11 +29,13 @@ def heatmap(values):
     return np.stack((strength, strength * (1 - strength), np.zeros_like(strength)), axis=-1)
 
 
-def contact_sheet(directory, capture, profile):
+def contact_sheet(directory, capture, profile, cancel_event=None):
     directory = Path(directory)
     size, columns = int(profile["size"]), int(profile["columns"])
     sheet = Image.new("RGB", (size * columns, size * math.ceil(len(capture["views"]) / columns)), "black")
     for index, view in enumerate(capture["views"]):
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Image processing cancelled")
         path = contained(directory, view["file"])
         with Image.open(path) as image:
             image.load()
@@ -43,9 +45,9 @@ def contact_sheet(directory, capture, profile):
             sheet.paste(rgb, ((index % columns) * size, (index // columns) * size))
             normalize = image.mode != "RGB"
         if normalize:
-            rgb.save(path)
+            rgb.save(path, compress_level=1)
         view["sha256"] = file_hash(path)
-    sheet.save(directory / "contact_sheet.png")
+    sheet.save(directory / "contact_sheet.png", compress_level=1)
     capture["sheet_sha256"] = file_hash(directory / "contact_sheet.png")
 
 
@@ -54,7 +56,7 @@ class Comparer:
         self.store = store
         self.lock = threading.RLock()
 
-    def compare(self, left_id, right_id, thresholds=None):
+    def compare(self, left_id, right_id, thresholds=None, cancel_event=None):
         thresholds = thresholds or [0.99, 0.97]
         if (len(thresholds) != 2 or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
                 and math.isfinite(v) and -1 <= v <= 1 for v in thresholds) or thresholds[0] < thresholds[1]):
@@ -84,6 +86,8 @@ class Comparer:
                         if a["profile"].get(key) != b["profile"].get(key)]
             else:
                 for a, b in zip(left["views"], right["views"]):
+                    if cancel_event and cancel_event.is_set():
+                        raise InterruptedError("Comparison cancelled")
                     with Image.open(contained(self.store.capture_path(left_id), a["file"])) as image:
                         x = np.asarray(image.convert("RGB"), dtype=np.float64) / 255.0
                     with Image.open(contained(self.store.capture_path(right_id), b["file"])) as image:
@@ -103,8 +107,8 @@ class Comparer:
                         global_score, ssim_map = similarity(x, y, full=True)
                         roi_score = similarity(x[roi[1]:roi[3], roi[0]:roi[2]], y[roi[1]:roi[3], roi[0]:roi[2]]) if valid_roi else None
                     directory.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(np.round(np.abs(x - y) * 255).astype(np.uint8)).save(directory / (a["id"] + "_diff.png"))
-                    Image.fromarray(np.round(heatmap(ssim_map) * 255).astype(np.uint8)).save(directory / (a["id"] + "_heat.png"))
+                    Image.fromarray(np.round(np.abs(x - y) * 255).astype(np.uint8)).save(directory / (a["id"] + "_diff.png"), compress_level=1)
+                    Image.fromarray(np.round(heatmap(ssim_map) * 255).astype(np.uint8)).save(directory / (a["id"] + "_heat.png"), compress_level=1)
                     result["views"].append({"id": a["id"], "roi": roi, "score": roi_score, "full_score": global_score,
                         "status": "success" if valid_roi else "invalid_roi",
                         "reason": None if valid_roi else "Projected ROI is smaller than the SSIM window"})

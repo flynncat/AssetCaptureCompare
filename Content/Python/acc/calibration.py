@@ -2,7 +2,7 @@ import copy
 import statistics
 import threading
 import time
-from .common import uid, utcnow, write_json
+from .common import representative_assets, uid, utcnow, write_json
 
 
 def repeatability(store, asset):
@@ -37,7 +37,7 @@ class Calibration:
     def running(self):
         return bool(self.thread and self.thread.is_alive())
 
-    def start(self, prepared, profile, maximum):
+    def start(self, prepared, profile, maximum, cancel_event=None):
         if self.running or self.scheduler.running:
             raise ValueError("Wait for the current Capture or calibration")
         if len(prepared["assets"]) < 10:
@@ -45,6 +45,9 @@ class Calibration:
         if not isinstance(maximum, int) or not 2 <= maximum <= 8:
             raise ValueError("Maximum calibration concurrency must be between 2 and 8")
         self.cancelled.clear()
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Calibration cancelled")
+        prepared = dict(prepared, assets=representative_assets(prepared["assets"]))
         self.result = None
         self.thread = threading.Thread(target=self.run, args=(prepared, copy.deepcopy(profile), maximum), daemon=True)
         self.thread.start()
@@ -56,10 +59,11 @@ class Calibration:
     def run(self, prepared, profile, maximum):
         result = {"calibration_id": uid(), "created_at": utcnow(), "status": "running", "results": [], "recommended": None,
                   "asset_paths": [a["path"] for a in prepared["assets"]], "profile": profile,
-                  "acceptance_sample_size": len(prepared["assets"]) >= 50}
+                  "acceptance_sample_size": len(prepared["assets"]) >= 50,
+                  "selection_count": prepared.get("selection_count", len(prepared["assets"])), "sample_count": len(prepared["assets"])}
         try:
             self.phase = "预热资源"
-            warmup = self.scheduler.start(prepared, profile, 1, "Calibration warmup")
+            warmup = self.scheduler.start(prepared, profile, 1, "Calibration resource preparation", cancel_event=self.cancelled)
             self.scheduler.thread.join()
             if self.cancelled.is_set():
                 raise InterruptedError("Calibration cancelled")
@@ -74,7 +78,7 @@ class Calibration:
                         raise InterruptedError("Calibration cancelled")
                     self.phase = "{} 并发，第 {}/3 轮".format(count, repeat + 1)
                     try:
-                        batch = self.scheduler.start(prepared, profile, count, "Calibration {} workers / {}".format(count, repeat + 1))
+                        batch = self.scheduler.start(prepared, profile, count, "Calibration {} workers / {}".format(count, repeat + 1), cancel_event=self.cancelled)
                     except ValueError as error:
                         result["resource_limit"] = str(error)
                         stable = False

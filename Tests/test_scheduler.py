@@ -76,10 +76,10 @@ class SchedulerFaultTests(unittest.TestCase):
         self.assertTrue(all(a["status"] == "cancelled" for a in batch["assets"]))
 
     def test_disk_failure_does_not_discard_healthy_asset(self):
-        def selective_failure(directory, capture, profile):
+        def selective_failure(directory, capture, profile, cancel_event=None):
             if "DiskFailure" in capture["path"]:
                 raise PermissionError("Simulated output disk failure")
-            return contact_sheet(directory, capture, profile)
+            return contact_sheet(directory, capture, profile, cancel_event)
 
         with patch("acc.scheduler.contact_sheet", side_effect=selective_failure):
             batch = self.finish(self.start(["DiskFailure", "Healthy"]))

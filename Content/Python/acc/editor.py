@@ -11,7 +11,7 @@ import uuid
 import webbrowser
 from pathlib import Path
 import unreal
-from .common import DEFAULT_PROFILE, PLUGIN, digest, read_json, runtime_revision, utcnow, write_json
+from .common import DEFAULT_PROFILE, PLUGIN, digest, read_json, representative_assets, runtime_revision, utcnow, write_json
 
 _handle = None
 _last_tick = 0
@@ -19,6 +19,8 @@ _mounts = None
 _server = None
 _session = uuid.uuid4().hex
 _busy = False
+_preparing = None
+_last_heartbeat = 0
 
 
 def project_dir():
@@ -44,7 +46,7 @@ def package_files(package):
     return [str(base.with_suffix(extension)) for extension in (".uasset", ".umap", ".uexp", ".ubulk") if base.with_suffix(extension).is_file()]
 
 
-def dependencies(path):
+def dependency_steps(path, cache):
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
     options = unreal.AssetRegistryDependencyOptions(include_hard_package_references=True, include_soft_package_references=True)
     pending, seen, files = [path.split(".")[0]], set(), set()
@@ -53,9 +55,73 @@ def dependencies(path):
         if package in seen or package.startswith("/Script/"):
             continue
         seen.add(package)
-        files.update(package_files(package))
-        pending.extend(str(p) for p in (registry.get_dependencies(package, options) or []) if str(p) not in seen)
+        if package not in cache:
+            cache[package] = (package_files(package), [str(p) for p in (registry.get_dependencies(package, options) or [])])
+        package_sources, references = cache[package]
+        files.update(package_sources)
+        pending.extend(p for p in references if p not in seen)
+        yield
     return sorted(files), seen
+
+
+def dependencies(path):
+    steps = dependency_steps(path, {})
+    while True:
+        try:
+            next(steps)
+        except StopIteration as result:
+            return result.value
+
+
+def prepare_steps(request):
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    paths = list(dict.fromkeys(request["paths"]))
+    if not paths or len(paths) > 10000:
+        raise ValueError("Select 1-10000 assets")
+    selection_count = len(paths)
+    if request.get("sample_limit"):
+        values = []
+        for path in paths:
+            data = registry.get_asset_by_object_path(path)
+            if data.is_valid():
+                values.append(describe(data))
+            yield
+        paths = [a["path"] for a in representative_assets(values, int(request["sample_limit"]))]
+    dirty = {p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()}
+    dirty.update(p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
+    assets, touched, cache = [], set(), {}
+    for index, path in enumerate(paths):
+        yield {"phase": "dependencies", "completed": index, "total": len(paths), "path": path}
+        data = registry.get_asset_by_object_path(path)
+        if not data.is_valid() or str(data.asset_class) not in ("StaticMesh", "SkeletalMesh", "Blueprint"):
+            raise ValueError("Unsupported or missing asset: " + path)
+        files, packages = yield from dependency_steps(path, cache)
+        if not files:
+            raise ValueError("Asset must be saved on disk: " + path)
+        item = describe(data)
+        item["files"] = files
+        assets.append(item)
+        touched.update(packages)
+    scene = str(request.get("scene", DEFAULT_PROFILE["scene"]))
+    if not package_files(scene):
+        raise RuntimeError("Capture map does not exist: " + scene)
+    yield {"phase": "scene", "completed": len(paths), "total": len(paths)}
+    scene_files, scene_packages = yield from dependency_steps(scene, cache)
+    if scene == DEFAULT_PROFILE["scene"] and len(scene_packages) <= 1:
+        template_files, template_packages = yield from dependency_steps("/Engine/Maps/Templates/Template_Default", cache)
+        scene_files = sorted(set(scene_files + template_files))
+        scene_packages.update(template_packages)
+    scene_package = scene.split(".")[0]
+    scene_files = sorted(set(scene_files + package_files(scene_package + "_BuiltData")))
+    if {p.split(".")[0] for p in paths}.intersection(scene_packages):
+        raise ValueError("A target is also part of the capture environment; use an independent scene")
+    unsaved = dirty.intersection(touched | scene_packages)
+    if unsaved:
+        raise ValueError("Save these packages before Capture: " + ", ".join(sorted(unsaved)))
+    return {"assets": assets, "scene_files": scene_files, "scene_package": scene_package, "selection_count": selection_count,
+            "engine": str(Path(unreal.Paths.convert_relative_path_to_full(unreal.Paths.engine_dir())).resolve().parent),
+            "project": str(project_dir() / (unreal.Paths.get_base_filename(unreal.Paths.get_project_file_path()) + ".uproject")),
+            "engine_version": unreal.SystemLibrary.get_engine_version(), "plugin_version": "0.1.0"}
 
 
 def describe(data):
@@ -75,45 +141,12 @@ def handle(request):
         values = registry.get_assets_by_path(path, recursive=True)
         return {"assets": sorted([describe(a) for a in values if str(a.asset_class) in ("StaticMesh", "SkeletalMesh", "Blueprint")], key=lambda a: a["path"])}
     if action == "prepare":
-        paths = list(dict.fromkeys(request["paths"]))
-        if not paths or len(paths) > 10000:
-            raise ValueError("Select 1-10000 assets")
-        dirty = {p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()}
-        dirty.update(p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages())
-        assets, touched = [], set()
-        for path in paths:
-            data = registry.get_asset_by_object_path(path)
-            if not data.is_valid() or str(data.asset_class) not in ("StaticMesh", "SkeletalMesh", "Blueprint"):
-                raise ValueError("Unsupported or missing asset: " + path)
-            files, packages = dependencies(path)
-            if not files:
-                raise ValueError("Asset must be saved on disk: " + path)
-            item = describe(data)
-            item["files"] = files
-            assets.append(item)
-            touched.update(packages)
-        scene = str(request.get("scene", DEFAULT_PROFILE["scene"]))
-        if not package_files(scene):
-            if scene != DEFAULT_PROFILE["scene"]:
-                raise ValueError("Capture map does not exist: " + scene)
-            raise RuntimeError("Initialize the plugin's Default map with Tools/initialize_scene.py first")
-        scene_files, scene_packages = dependencies(scene)
-        if scene == DEFAULT_PROFILE["scene"] and len(scene_packages) <= 1:
-            template_files, template_packages = dependencies("/Engine/Maps/Templates/Template_Default")
-            scene_files = sorted(set(scene_files + template_files))
-            scene_packages.update(template_packages)
-        scene_package = scene.split(".")[0]
-        scene_files = sorted(set(scene_files + package_files(scene_package + "_BuiltData")))
-        target_packages = {p.split(".")[0] for p in paths}
-        if target_packages.intersection(scene_packages):
-            raise ValueError("A target is also part of the capture environment; use an independent scene")
-        unsaved = dirty.intersection(touched | scene_packages)
-        if unsaved:
-            raise ValueError("Save these packages before Capture: " + ", ".join(sorted(unsaved)))
-        return {"assets": assets, "scene_files": scene_files, "scene_package": scene_package,
-                "engine": str(Path(unreal.Paths.convert_relative_path_to_full(unreal.Paths.engine_dir())).resolve().parent),
-                "project": str(project_dir() / (unreal.Paths.get_base_filename(unreal.Paths.get_project_file_path()) + ".uproject")),
-                "engine_version": unreal.SystemLibrary.get_engine_version(), "plugin_version": "0.1.0"}
+        steps = prepare_steps(request)
+        while True:
+            try:
+                next(steps)
+            except StopIteration as result:
+                return result.value
     raise ValueError("Unknown editor operation")
 
 
@@ -129,19 +162,48 @@ def tick(delta):
 
 
 def bridge_tick(delta):
-    global _last_tick
+    global _last_tick, _preparing, _last_heartbeat
     now = time.monotonic()
-    if now - _last_tick < 0.25:
+    if now - _last_tick < (0.02 if _preparing else 0.25):
         return
     _last_tick = now
     directory = bridge_dir()
-    write_json(directory / "editor.json", {"pid": os.getpid(), "session": _session, "heartbeat": time.time(),
-        "project": str(project_dir()), "engine_version": unreal.SystemLibrary.get_engine_version()})
+    if now - _last_heartbeat >= .25:
+        _last_heartbeat = now
+        write_json(directory / "editor.json", {"pid": os.getpid(), "session": _session, "heartbeat": time.time(),
+            "project": str(project_dir()), "engine_version": unreal.SystemLibrary.get_engine_version()})
+    if _preparing:
+        path, steps, status = _preparing
+        try:
+            deadline = time.monotonic() + .01
+            while time.monotonic() < deadline:
+                if path.with_suffix(".cancel").exists():
+                    raise InterruptedError("Capture cancelled during dependency preparation")
+                progress = next(steps)
+                if progress:
+                    status.update(progress)
+            write_json(path.with_suffix(".progress"), status)
+        except StopIteration as result:
+            write_json(directory / "responses" / path.name, {"ok": True, "data": result.value})
+            if path.with_suffix(".cancel").exists():
+                path.with_suffix(".cancel").unlink()
+            _preparing = None
+        except Exception as error:
+            steps.close()
+            write_json(directory / "responses" / path.name, {"ok": False, "error": str(error)})
+            if path.with_suffix(".cancel").exists():
+                path.with_suffix(".cancel").unlink()
+            _preparing = None
+        return
     for path in list((directory / "requests").glob("*.json"))[:1]:
         request = read_json(path)
         try:
             if request.get("session") != _session:
                 raise ValueError("Editor session has changed; refresh the page")
+            if request["action"] == "prepare":
+                _preparing = (path, prepare_steps(request), {"phase": "dependencies", "completed": 0, "total": len(request["paths"])})
+                path.unlink()
+                return
             response = {"ok": True, "data": handle(request)}
         except Exception as error:
             response = {"ok": False, "error": str(error), "traceback": traceback.format_exc()}

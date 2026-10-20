@@ -74,7 +74,11 @@ def recover_workers(store):
                 existing = store.capture_path(asset["capture_id"]) / "capture.json"
                 capture = read_json(existing)
                 asset["status"] = capture["status"] if capture else "interrupted"
-                asset["error"] = "Service interrupted before the batch was sealed"
+                asset["error"] = capture.get("error") if capture else "Service interrupted before the batch was sealed"
+                if capture:
+                    asset["finished_at"] = capture.get("finished_at")
+                    asset["timings"] = capture.get("timings", {})
+                    asset["capture_seconds"] = capture.get("capture_seconds")
         batch.update(status="interrupted", error="Previous service stopped before sealing this batch", finished_at=utcnow())
         work = contained(PLUGIN / "Content/ACCWork", batch["batch_id"])
         if workers_stopped and work.is_dir() and work.parent == PLUGIN / "Content/ACCWork":
@@ -103,12 +107,15 @@ class Scheduler:
         self.workers = []
         self.processing = ThreadPoolExecutor(max_workers=2, thread_name_prefix="acc-image")
         self.active_id = None
+        self.active_batch = None
+        self.cancel_requested = None
+        self.phase = "idle"
 
     @property
     def running(self):
         return self.thread is not None and self.thread.is_alive()
 
-    def start(self, prepared, profile, count, label="", retry_of=None):
+    def start(self, prepared, profile, count, label="", retry_of=None, cancel_event=None, on_progress=None):
         with self.guard:
             if self.running:
                 raise ValueError("A Capture batch is already running")
@@ -130,14 +137,31 @@ class Scheduler:
             context = {"engine": prepared["engine"], "project": prepared["project"], "engine_version": prepared["engine_version"],
                        "plugin_version": prepared["plugin_version"], "machine": machine,
                        "requested_concurrency": count, "actual_concurrency": count}
-            batch = self.store.new_batch(prepared["assets"], profile, context, label, retry_of)
+            batch = self.store.new_batch(prepared["assets"], profile, context, label, retry_of, cancel_event, on_progress)
+            if cancel_event and cancel_event.is_set():
+                self.mark_remaining(batch, "Cancelled by user", "cancelled")
+                batch.update(status="cancelled", finished_at=utcnow())
+                self.store.save_batch(batch)
+                raise InterruptedError("Capture cancelled during preparation")
+            self.cancel_requested = None
             self.active_id = batch["batch_id"]
+            self.active_batch = batch
+            self.phase = "snapshot"
             self.thread = threading.Thread(target=self.run, args=(batch, prepared, count), daemon=True, name="acc-scheduler")
             self.thread.start()
             return batch
 
     def cancel(self):
+        if not self.cancel_event.is_set():
+            self.cancel_requested = time.monotonic()
         self.cancel_event.set()
+
+    def mark_remaining(self, batch, error, status):
+        with self.store.lock:
+            finished = utcnow()
+            for asset in batch["assets"]:
+                if asset["status"] in ("queued", "capturing", "processing"):
+                    asset.update(status=status, error=error, finished_at=finished)
 
     def launch(self, directory, index, batch, scene_file):
         setup_started = time.monotonic()
@@ -180,6 +204,8 @@ class Scheduler:
     def process_result(self, batch, asset, result, staging):
         timings = Timings()
         try:
+            if self.cancel_event.is_set():
+                return
             if result["status"] != "success":
                 self.fail(batch, asset, result.get("error", "Capture failed"))
                 return
@@ -191,15 +217,17 @@ class Scheduler:
             if adapter != "unavailable" and adapter not in result.get("render_environment", ""):
                 raise ValueError("Worker rendered on a different GPU: " + result.get("render_environment", ""))
             with timings.measure("image_processing"):
-                contact_sheet(staging, result, batch["profile"])
+                contact_sheet(staging, result, batch["profile"], cancel_event=self.cancel_event)
+            if self.cancel_event.is_set():
+                return
             destination = self.store.capture_path(asset["capture_id"])
             destination.parent.mkdir(parents=True, exist_ok=True)
             with timings.measure("publication"):
                 self.store.finish_asset(batch, asset, result, staging)
-            if asset.get("baseline_id"):
+            if asset.get("baseline_id") and not self.cancel_event.is_set():
                 try:
                     with timings.measure("comparison"):
-                        comparison = self.comparer.compare(asset["baseline_id"], asset["capture_id"])
+                        comparison = self.comparer.compare(asset["baseline_id"], asset["capture_id"], cancel_event=self.cancel_event)
                     asset["comparison"] = {k: comparison[k] for k in ("comparison_id", "status", "score", "category", "worst_view", "reasons") if k in comparison}
                 except Exception as error:
                     asset["comparison"] = {"status": "failed", "error": str(error)}
@@ -207,13 +235,15 @@ class Scheduler:
                 asset["comparison"] = {"status": "no_baseline"}
             asset["timings"] = dict(result.get("timings", {}), **timings.seconds)
             asset["capture_seconds"] = result.get("capture_seconds")
-            self.store.save_batch(batch)
+            self.store.save_batch(batch, force=False)
         except Exception as error:
+            if isinstance(error, InterruptedError) and self.cancel_event.is_set():
+                return
             if not self.store.capture_path(asset["capture_id"]).exists():
                 self.fail(batch, asset, str(error))
             else:
                 asset["comparison"] = {"status": "failed", "error": str(error)}
-                self.store.save_batch(batch)
+                self.store.save_batch(batch, force=False)
 
     def run(self, batch, prepared, count):
         started = time.monotonic()
@@ -228,10 +258,12 @@ class Scheduler:
             for path in files:
                 key = path, tuple(stamps[path])
                 if key not in hashes:
-                    hashes[key] = file_hash(path)
+                    hashes[key] = file_hash(path, self.cancel_event)
                 values[path] = hashes[key]
             return digest(values)
         try:
+            if self.cancel_event.is_set():
+                return
             work.mkdir(parents=True)
             snapshot = batch_dir / "scene_snapshot"
             snapshot.mkdir()
@@ -245,7 +277,7 @@ class Scheduler:
                     shutil.copy2(str(source), str(snapshot / source.name))
                     shutil.copy2(str(source), str(work / source.name))
                     frozen_sources.add(source)
-            scene_version = {p: file_hash(snapshot / Path(p).name if Path(p) in frozen_sources else p)
+            scene_version = {p: file_hash(snapshot / Path(p).name if Path(p) in frozen_sources else p, self.cancel_event)
                              for p in prepared["scene_files"]}
             if file_stamps(prepared["scene_files"]) != snapshot_stamps:
                 raise ValueError("Scene changed while creating its snapshot; retry Capture")
@@ -264,7 +296,10 @@ class Scheduler:
             self.store.save_batch(batch)
             scene_snapshot_seconds = time.monotonic() - started
             for index in range(count):
+                if self.cancel_event.is_set():
+                    break
                 self.workers.append(self.launch(work, index, batch, work / scene_map.name))
+            self.phase = "capturing"
             pending = list(batch["assets"])
             attempts = {}
             metrics = {"peak_worker_rss_gib": 0, "peak_gpu_used_mib": 0, "peak_system_used_gib": 0, "worker_restarts": 0,
@@ -277,6 +312,12 @@ class Scheduler:
             gpu_sample = {}
             progress_at = 0
             while pending or any(w["asset"] for w in self.workers):
+                if self.cancel_event.is_set():
+                    break
+                for future in futures:
+                    if future.done():
+                        future.result()
+                futures = [f for f in futures if not f.done()]
                 if time.monotonic() - sampled_at > 2:
                     sampled_at = time.monotonic()
                     rss = 0
@@ -350,11 +391,14 @@ class Scheduler:
                         worker["asset"] = None
                         worker["completed"] += 1
                         # Limit pending full-resolution images rather than building an unbounded queue.
-                        while sum(not f.done() for f in futures) >= max(2, count):
-                            time.sleep(0.1)
-                    elif asset and time.monotonic() - worker["assigned"] > batch["profile"]["timeout"]:
+                    if self.cancel_event.is_set():
+                        break
+                    elif worker["asset"] and time.monotonic() - worker["assigned"] > batch["profile"]["timeout"]:
                         process.kill()
                     if worker["asset"] is None and pending and not self.cancel_event.is_set():
+                        if len(futures) >= max(2, count):
+                            worker["phase"] = "processing_images"
+                            continue
                         healthy = sum(not w.get("disabled") for w in self.workers)
                         gpu_pressure = gpu_sample.get("used_mib", 0) > gpu_sample.get("total_mib", 1024 * 1024) - 128
                         if healthy > 1 and (psutil.virtual_memory().available < 6 * 1024 ** 3 or gpu_pressure):
@@ -398,17 +442,12 @@ class Scheduler:
                         worker.update(asset=asset, staging=staging, assigned=time.monotonic())
                         asset.update(status="capturing", worker=worker["index"], started_at=utcnow())
                         write_json(path.with_suffix(".task.json"), task)
-                        self.store.save_batch(batch)
+                        self.store.save_batch(batch, force=False)
                 if pending and all(w.get("disabled") for w in self.workers):
                     fatal = "No healthy capture workers remain"
                     self.cancel_event.set()
                 if self.cancel_event.is_set():
-                    for asset in pending:
-                        self.fail(batch, asset, fatal or "Cancelled by user", "cancelled")
-                    pending.clear()
-                    for worker in self.workers:
-                        if worker["asset"]:
-                            worker["process"].terminate()
+                    break
                 now = time.monotonic()
                 busy = sum(bool(w["asset"]) and not w.get("disabled") and w.get("phase") not in ("starting", "idle")
                            for w in self.workers)
@@ -422,29 +461,36 @@ class Scheduler:
                         "phase": w.get("phase"), "startup_seconds": now - w["started"] if not w["ready"] else None,
                         "path": w["asset"]["path"] if w["asset"] else None} for w in self.workers],
                         "elapsed_seconds": time.monotonic() - started})
-                time.sleep(0.05)
+                self.cancel_event.wait(0.02)
         except Exception as error:
-            fatal = str(error)
+            if not isinstance(error, InterruptedError) or not self.cancel_event.is_set():
+                fatal = str(error)
         finally:
+            self.phase = "cancelling" if self.cancel_event.is_set() else "finalizing"
             for worker in self.workers:
                 worker["path"].with_suffix(".stop").touch()
+                if self.cancel_event.is_set() and worker["process"].poll() is None:
+                    worker["process"].terminate()
+            stop_deadline = time.monotonic() + (3 if self.cancel_event.is_set() else 10)
             for worker in self.workers:
                 process = worker["process"]
                 try:
-                    process.wait(timeout=10)
+                    process.wait(timeout=max(.01, stop_deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=10)
             for future in futures:
+                if self.cancel_event.is_set():
+                    future.cancel()
                 try:
+                    if future.cancelled():
+                        continue
                     future.result()
                 except Exception as error:
                     fatal = str(error)
-            for asset in batch["assets"]:
-                if asset["status"] in ("queued", "capturing", "processing"):
-                    self.fail(batch, asset, fatal or "Cancelled", "failed" if fatal else "cancelled")
+            self.mark_remaining(batch, fatal or "Cancelled by user", "failed" if fatal else "cancelled")
             success = sum(a["status"] == "success" for a in batch["assets"])
-            batch.update(status="success" if success == len(batch["assets"]) else "partial" if success else "cancelled" if self.cancel_event.is_set() and not fatal else "failed",
+            batch.update(status="cancelled" if self.cancel_event.is_set() and not fatal else "success" if success == len(batch["assets"]) else "partial" if success else "failed",
                 finished_at=utcnow(), elapsed_seconds=time.monotonic() - started, error=fatal)
             if "metrics" in locals():
                 batch["metrics"] = metrics
@@ -460,14 +506,24 @@ class Scheduler:
                         shutil.rmtree(str(work))
                     except OSError as error:
                         batch.setdefault("cleanup_warnings", []).append("Temporary scene retained: " + str(error))
-                batch["disk_bytes"] = sum(p.stat().st_size for p in batch_dir.rglob("*") if p.is_file())
+                if self.cancel_requested is not None:
+                    batch["cancellation_seconds"] = time.monotonic() - self.cancel_requested
                 self.store.save_batch(batch)
             finally:
                 self.active_id = None
+                self.active_batch = None
+                self.phase = "idle"
 
-    def progress(self):
+    def progress(self, summary=False):
         if not self.active_id:
             return {"running": False}
-        batch = self.store.batch(self.active_id)
+        batch = self.active_batch
         progress = read_json(self.store.root / "batches" / self.active_id / "progress.json", {})
-        return dict(progress, running=True, batch=batch)
+        if not batch:
+            return {"running": False}
+        completed = sum(a["status"] in ("success", "failed", "cancelled", "interrupted") for a in batch["assets"])
+        value = dict(progress, running=True, batch_id=batch["batch_id"], total=len(batch["assets"]), completed=completed,
+                     phase=self.phase, cancelling=self.cancel_event.is_set())
+        if not summary:
+            value["batch"] = copy.deepcopy(self.store.compact(batch))
+        return value
