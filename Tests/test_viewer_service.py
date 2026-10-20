@@ -51,6 +51,18 @@ class ViewerServiceTests(unittest.TestCase):
         with patch("acc.service.runtime_revision", return_value="changed"):
             self.assertEqual(self.app.get("/api/health", {})["runtime_revision"], health["runtime_revision"])
 
+    def test_idle_progress_exposes_history_changes(self):
+        before = self.app.get("/api/progress", {"summary": ["1"]})
+        self.assertFalse(before["running"])
+        from acc.common import DEFAULT_PROFILE
+        batch = self.app.store.new_batch([], DEFAULT_PROFILE, {}, label="Labelled capture")
+        listing = self.app.get("/api/batches", {})
+        progress = self.app.get("/api/progress", {"summary": ["1"]})
+        self.assertFalse(progress["running"])
+        self.assertNotEqual(before["history_revision"], progress["history_revision"])
+        self.assertEqual(listing["history_revision"], progress["history_revision"])
+        self.assertEqual(listing["batches"][0]["batch_id"], batch["batch_id"])
+
     def test_shutdown_requires_token_and_rejects_running_jobs(self):
         with self.assertRaises(urllib.error.HTTPError) as invalid:
             self.post("/api/shutdown", token="invalid")

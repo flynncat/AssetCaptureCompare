@@ -44,6 +44,24 @@ class LargeBatchTests(unittest.TestCase):
             with patch("acc.storage.write_json", side_effect=AssertionError("GET must not rewrite metadata")):
                 self.assertEqual(store.listing()[0]["label"], "External update")
 
+    def test_history_revision_detects_external_changes_without_reading_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            initial = store.history_revision()
+            batch = store.new_batch([], DEFAULT_PROFILE, {})
+            created = store.history_revision()
+            self.assertNotEqual(initial, created)
+            batch["label"] = "External label update"
+            write_json(store.root / "batches" / batch["batch_id"] / "batch.json", batch)
+            with patch("acc.storage.read_json", side_effect=AssertionError("Revision must only stat metadata")):
+                updated = store.history_revision()
+                self.assertNotEqual(created, updated)
+                self.assertEqual(updated, store.history_revision())
+            batch["status"] = "failed"
+            store.save_batch(batch)
+            store.delete_batch(batch["batch_id"])
+            self.assertEqual(initial, store.history_revision())
+
     def test_calibration_sample_is_bounded_deterministic_and_covers_types(self):
         assets = [{"path": "/Game/" + str(i), "class": "StaticMesh"} for i in range(6000)]
         assets += [{"path": "/Game/BP", "class": "Blueprint"}, {"path": "/Game/SK", "class": "SkeletalMesh"}]

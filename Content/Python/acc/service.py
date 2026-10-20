@@ -115,12 +115,14 @@ class Application:
             return {"settings": self.settings, "machine": self.machine, "editor": self.editor_state(),
                     "root": str(self.store.root), "calibration": read_json(self.store.root / "calibration.json")}
         if route == "/api/batches":
-            return {"batches": self.store.listing()}
+            with self.store.lock:
+                return {"batches": self.store.listing(), "history_revision": self.store.history_revision()}
         if route == "/api/progress":
             value = self.scheduler.progress(summary=query.get("summary") == ["1"])
             if self.preparation:
                 value.update(preparation=dict(self.preparation, elapsed_seconds=time.monotonic() - self.preparation["started"]),
                              cancelling=self.preparation_cancelled.is_set())
+            value["history_revision"] = self.store.history_revision()
             return value
         if route == "/api/calibration":
             return {"running": self.calibration.running, "phase": self.calibration.phase, "result": self.calibration.result}

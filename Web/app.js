@@ -19,7 +19,11 @@ function notice(message, error = false) { $("notice").textContent = message; $("
 async function api(path, data) { const response = await fetch(path, data === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-ACC-Token": token }, body: JSON.stringify(data) }); const value = await response.json(); if (!response.ok) throw new Error(value.error || response.statusText); return value; }
 async function safe(action) { try { await action(); } catch (error) { notice(error.message, true); } }
 function tab(name) { document.querySelectorAll(".page").forEach(e => e.classList.toggle("active", e.id === name)); document.querySelectorAll("[data-tab]").forEach(e => e.classList.toggle("active", e.dataset.tab === name)); }
-document.querySelectorAll("[data-tab]").forEach(e => e.onclick = () => tab(e.dataset.tab));
+document.querySelectorAll("[data-tab]").forEach(e => e.onclick = () => safe(async () => {
+  tab(e.dataset.tab);
+  if (e.dataset.tab !== "capture") await refresh();
+  if (e.dataset.tab === "compare" && (!state.right || state.right.capture_id !== $("right-asset").value || state.left?.capture_id !== $("left-asset").value)) await loadPair();
+}));
 function filteredAssets() { const q = $("asset-search").value.toLowerCase(); return state.assets.filter(a => a.path.toLowerCase().includes(q)); }
 function renderAssets() {
   const values = filteredAssets(); const pages = Math.max(1, Math.ceil(values.length / 50)); state.page = Math.min(state.page, pages - 1);
@@ -39,7 +43,18 @@ $("select-none").onclick = () => { state.selected.clear(); renderAssets(); };
 async function loadAssets(action) { notice(""); const value = await api("/api/editor", { action, path: $("scan-path").value }); state.assets = value.assets; state.selected = new Set(action === "selection" ? state.assets.map(a => a.path) : []); state.page = 0; renderAssets(); }
 $("selection").onclick = () => safe(() => loadAssets("selection")); $("scan").onclick = () => safe(() => loadAssets("scan"));
 function profile() { return { size: Number($("size").value), columns: Number($("columns").value), fov: Number($("fov").value), padding: Number($("padding").value), orientation: Number($("orientation").value), warmup_frames: Number($("warmup_frames").value), worker_memory_gib: Number($("worker_memory_gib").value), scene: $("scene").value, hide_floor: $("hide_floor").checked, reframe: $("reframe").checked }; }
-$("capture-form").onsubmit = event => { event.preventDefault(); safe(async () => { if (!state.selected.size) throw new Error("请选择需要采集的资产"); $("capture-start").disabled = true; try { const value = await api("/api/capture", { paths: [...state.selected], profile: profile(), concurrency: Number($("concurrency").value), label: $("label").value }); notice("采集任务已创建：" + value.batch_id); await refresh(); } finally { $("capture-start").disabled = state.running; } }); };
+$("capture-form").onsubmit = event => { event.preventDefault(); safe(async () => {
+  if (!state.selected.size) throw new Error("请选择需要采集的资产");
+  const label = $("label").value;
+  $("capture-start").disabled = true; state.submitting = true; notice("正在创建采集任务…");
+  try {
+    const value = await api("/api/capture", { paths: [...state.selected], profile: profile(), concurrency: Number($("concurrency").value), label });
+    notice("采集任务已创建：" + (label || value.batch_id) + " · " + value.batch_id);
+    await refresh(true);
+    $("right-batch").value = value.batch_id; assetOptions("right");
+    state.left = state.right = state.comparison = null; ++state.pairRevision; renderImages();
+  } finally { state.submitting = false; $("capture-start").disabled = state.running; }
+}); };
 $("capture-cancel").onclick = () => safe(async () => { await api("/api/cancel", {}); notice("正在停止采集并保留已完成结果"); });
 $("output-save").onclick = () => safe(async () => { await api("/api/output", { root: $("output-root").value }); await refresh(); });
 $("reveal").onclick = () => safe(() => api("/api/reveal", {}));
@@ -159,9 +174,11 @@ $("zoom-in").onclick = () => { state.zoom = Math.min(8, state.zoom * 1.25); upda
 let dragging = null; $("image-stage").onpointerdown = event => { dragging = [event.clientX, event.clientY, ...state.pan]; $("image-stage").setPointerCapture(event.pointerId); }; $("image-stage").onpointermove = event => { if (dragging) { state.pan = [dragging[2] + event.clientX - dragging[0], dragging[3] + event.clientY - dragging[1]]; updateTransform(); } }; $("image-stage").onpointerup = $("image-stage").onpointercancel = () => { dragging = null; };
 $("copy-link").onclick = () => safe(async () => { const params = new URLSearchParams({ left: $("left-asset").value, right: $("right-asset").value, view: $("view").value }); await navigator.clipboard.writeText(location.origin + "/?" + params); notice("对比链接已复制"); });
 async function openAsset(asset) { tab("compare"); $("right-batch").value = asset.capture_id.split("/")[0]; assetOptions("right", asset.capture_id); $("use-baseline").checked = true; await loadPair(); if (state.left && state.right?.status === "success") $("run-compare").click(); }
+function matchesBatch(batch, q) { return [batch.label, batch.batch_id, localTime(batch.created_at), batch.finished_at && localTime(batch.finished_at)].filter(Boolean).some(v => v.toLowerCase().includes(q)); }
 function matchedAssets(batch) {
   const filter = $("result-filter").value, q = $("batch-search").value.toLowerCase();
-  const values = batch.assets.filter(a => (!filter || (filter === "failed" ? a.status === "failed" : (a.comparison?.category || a.comparison?.status) === filter)) && (!q || batch.label.toLowerCase().includes(q) || a.path.toLowerCase().includes(q)));
+  const batchMatch = matchesBatch(batch, q);
+  const values = batch.assets.filter(a => (!filter || (filter === "failed" ? a.status === "failed" : (a.comparison?.category || a.comparison?.status) === filter)) && (!q || batchMatch || a.path.toLowerCase().includes(q)));
   if ($("result-sort").value === "score") values.sort((a, b) => (a.comparison?.score ?? 2) - (b.comparison?.score ?? 2));
   return values;
 }
@@ -183,17 +200,17 @@ function historyRows(batch, assets) {
 }
 function renderBatches() {
   const q = $("batch-search").value.toLowerCase(), filter = $("batch-status").value;
-  const values = state.batches.filter(b => (!filter || b.status === filter) && matchedAssets(b).length);
+  const values = state.batches.filter(b => (!filter || b.status === filter) && (matchedAssets(b).length || (!b.assets.length && matchesBatch(b, q) && !$("result-filter").value)));
   if ($("result-sort").value === "score") values.sort((a, b) => Math.min(...matchedAssets(a).map(a => a.comparison?.score ?? 2)) - Math.min(...matchedAssets(b).map(a => a.comparison?.score ?? 2)));
   $("batch-count").textContent = `${values.length} 个批次`; $("batch-list").replaceChildren();
   const pages = Math.max(1, Math.ceil(values.length / 20)); state.batchPage = Math.min(state.batchPage, pages - 1); $("batch-page").textContent = `${state.batchPage + 1} / ${pages}`; $("batch-prev").disabled = state.batchPage === 0; $("batch-next").disabled = state.batchPage + 1 >= pages;
   for (const batch of values.slice(state.batchPage * 20, (state.batchPage + 1) * 20)) {
-    const section = document.createElement("article"); section.className = "batch"; const title = document.createElement("div");
+    const section = document.createElement("article"); section.className = "batch"; section.dataset.batchId = batch.batch_id; const title = document.createElement("div");
     const counts = status => batch.assets.filter(a => a.status === status).length;
-    title.append(text("h3", batch.label), text("p", `${localTime(batch.created_at)} · ${counts("success")}/${batch.assets.length} 成功 · ${counts("failed")} 失败 · ${counts("cancelled")} 取消 · ${labels[batch.status] || batch.status}`),
+    title.append(text("h3", batch.label), text("p", `开始 ${localTime(batch.created_at)}${batch.finished_at ? " · 完成 " + localTime(batch.finished_at) : ""} · ${counts("success")}/${batch.assets.length} 成功 · ${counts("failed")} 失败 · ${counts("cancelled")} 取消 · ${labels[batch.status] || batch.status}`),
       text("p", `${batch.profile.size}px × ${batch.profile.views.length} 视角 · FOV ${batch.profile.fov} · ${batch.context.actual_concurrency ?? batch.context.requested_concurrency} 并发 · ${Math.round(batch.elapsed_seconds || 0)}s${batch.disk_bytes ? " · " + (batch.disk_bytes / 1024 ** 2).toFixed(1) + " MiB" : ""}`), text("p", batch.batch_id));
     if (batch.error) title.append(text("p", batch.error)); section.append(title);
-    const commands = text("div", "", "commands"); commands.append(button("查看", () => openAsset(batch.assets[0])), button("定位", () => api("/api/reveal", { batch_id: batch.batch_id })));
+    const commands = text("div", "", "commands"); if (batch.assets.length) commands.append(button("查看", () => openAsset(batch.assets[0]))); commands.append(button("定位", () => api("/api/reveal", { batch_id: batch.batch_id })));
     if (batch.status !== "running" && batch.assets.some(a => ["failed", "cancelled", "interrupted"].includes(a.status))) commands.append(button("重试失败项", async () => { await api("/api/retry", { batch_id: batch.batch_id, concurrency: Number($("concurrency").value) }); tab("capture"); await refresh(); }));
     const remove = button("删除", async () => { const size = await api("/api/batch/size?id=" + encodeURIComponent(batch.batch_id)); $("delete-description").textContent = `${batch.label}，${localTime(batch.created_at)}，${batch.assets.length} 个资产，${(size.bytes / 1024 ** 2).toFixed(1)} MiB。相关对比缓存也会删除。`; const dialog = $("delete-dialog"); dialog.showModal(); const choice = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true })); if (choice === "confirm") { await api("/api/delete", { batch_id: batch.batch_id }); await refresh(); } }); remove.disabled = batch.status === "running"; commands.append(remove); section.append(commands);
     const previews = text("div", "", "batch-assets");
@@ -205,12 +222,15 @@ function renderBatches() {
 $("batch-search").oninput = () => { state.batchPage = 0; renderBatches(); }; for (const id of ["batch-status", "result-filter", "result-sort"]) $(id).onchange = () => { state.batchPage = 0; renderBatches(); };
 $("batch-prev").onclick = () => { state.batchPage--; renderBatches(); }; $("batch-next").onclick = () => { state.batchPage++; renderBatches(); };
 async function poll() {
-  const value = await api("/api/progress?summary=1"); const wasRunning = state.running; state.running = value.running || Boolean(value.preparation); $("capture-start").disabled = state.running || state.calibration; $("capture-cancel").disabled = !state.running || value.cancelling;
+  const value = await api("/api/progress?summary=1"); const wasRunning = state.running; state.running = value.running || Boolean(value.preparation); $("capture-start").disabled = state.submitting || state.running || state.calibration; $("capture-cancel").disabled = !state.running || value.cancelling;
   $("worker-list").replaceChildren();
   if (value.preparation) { const p = value.preparation; const names = { dependencies: "检查资产依赖", baselines: "查找历史基线", scene: "检查采集场景" }; $("progress").max = p.total || 1; $("progress").value = p.completed; $("progress-summary").textContent = `${value.cancelling ? "正在取消" : names[p.phase] || p.phase} · ${p.completed}/${p.total} · ${Math.round(p.elapsed_seconds)}s`; }
   else if (value.running) { $("progress").max = value.total; $("progress").value = value.completed; $("progress-summary").textContent = `${value.cancelling ? "正在取消 · " : value.phase === "finalizing" ? "正在收尾 · " : ""}${value.completed}/${value.total} · ${Math.round(value.elapsed_seconds || 0)}s · 并发 ${value.actual_concurrency} / 上限 ${value.concurrency_limit}`; for (const worker of value.workers || []) $("worker-list").append(text("div", `Worker ${worker.index + 1} · ${workerPhase(worker)} · ${worker.path || ""}`)); const reasons = { "RAM headroom": "内存余量限制", "VRAM headroom": "显存余量限制", "Disk headroom": "磁盘余量限制", "Waiting for worker measurement": "正在测量 Worker 占用", "Image processing backpressure": "正在处理采集图片" }; if (value.concurrency_reason) $("worker-list").append(text("div", reasons[value.concurrency_reason] || value.concurrency_reason, "muted")); }
-  else if (wasRunning) { $("progress-summary").textContent = "任务结束"; notice("任务已结束，已完成结果已保留"); await refresh(); }
-  const calibration = await api("/api/calibration"); const wasCalibrating = state.calibration; state.calibration = calibration.running; $("calibration-state").textContent = calibration.result?.error || calibration.phase || ""; $("calibrate").disabled = state.running || state.calibration; $("calibrate-cancel").hidden = !state.calibration; $("capture-start").disabled = state.running || state.calibration;
+  else if (wasRunning) { $("progress-summary").textContent = "任务结束"; await refresh(); }
+  // Discover new batches and missed completions without downloading all history on every checkpoint.
+  if (value.history_revision && value.history_revision !== state.historyRevision &&
+      (!state.running || (value.batch_id && !state.batches.some(b => b.batch_id === value.batch_id)))) await refresh();
+  const calibration = await api("/api/calibration"); const wasCalibrating = state.calibration; state.calibration = calibration.running; $("calibration-state").textContent = calibration.result?.error || calibration.phase || ""; $("calibrate").disabled = state.running || state.calibration; $("calibrate-cancel").hidden = !state.calibration; $("capture-start").disabled = state.submitting || state.running || state.calibration;
   if (wasCalibrating && !state.calibration && calibration.result?.recommended) $("concurrency").value = calibration.result.recommended;
   if (calibration.result) renderCalibration(calibration.result);
 }
@@ -228,7 +248,31 @@ function renderCalibration(result) {
 }
 $("calibrate").onclick = () => safe(async () => { if (state.selected.size < 10) throw new Error("校准至少选择 10 个代表资产；正式性能验收使用至少 50 个。"); await api("/api/calibrate", { paths: [...state.selected], profile: profile(), max_workers: Number($("calibration-max").value) }); notice("已启动逐档并发校准"); });
 $("calibrate-cancel").onclick = () => safe(() => api("/api/calibrate/cancel", {}));
-async function refresh() { const value = await api("/api/batches"); state.batches = value.batches; refreshSelectors(); renderBatches(); }
+let historyRequest = null;
+async function refresh(force = false) {
+  if (historyRequest) { if (!force) return historyRequest; await historyRequest; }
+  historyRequest = (async () => {
+    const value = await api("/api/batches"); state.batches = value.batches; state.historyRevision = value.history_revision;
+    refreshSelectors(); renderBatches(); renderLatestCapture();
+  })().finally(() => { historyRequest = null; });
+  return historyRequest;
+}
+function latestBatch() { return state.batches[0]; }
+function renderLatestCapture() {
+  const batch = latestBatch(); $("latest-capture").hidden = !batch; if (!batch) return;
+  $("latest-capture-summary").textContent = `最近批次：${batch.label} · ${labels[batch.status] || batch.status} · ${batch.assets.length} 个资产 · 开始 ${localTime(batch.created_at)}${batch.finished_at ? " · 完成 " + localTime(batch.finished_at) : ""}`;
+  $("latest-compare").disabled = !batch.assets.some(a => a.status === "success");
+}
+$("latest-batch").onclick = () => safe(async () => {
+  await refresh(); const batch = latestBatch(); if (!batch) return;
+  $("batch-search").value = batch.batch_id; $("batch-status").value = $("result-filter").value = ""; $("result-sort").value = "time"; state.batchPage = 0;
+  renderBatches(); tab("batches");
+});
+$("latest-compare").onclick = () => safe(async () => {
+  await refresh(); const asset = latestBatch()?.assets.find(a => a.status === "success"); if (asset) await openAsset(asset);
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) safe(refresh); });
+window.addEventListener("focus", () => safe(refresh));
 $("refresh").onclick = () => safe(refresh);
 async function init() {
   const value = await api("/api/state"); $("connection").textContent = value.editor.connected ? "UE 已连接" : "独立查看模式"; $("connection").classList.toggle("offline", !value.editor.connected);

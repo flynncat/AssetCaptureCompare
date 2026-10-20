@@ -8,6 +8,7 @@
 <body>
   <header><div><h1>Asset Capture Compare</h1><span id="connection" class="status">连接中</span></div><nav aria-label="主导航"><button data-tab="capture" class="active">Capture</button><button data-tab="compare">历史对比</button><button data-tab="batches">批次管理</button></nav><button id="refresh">刷新</button></header>
   <div id="notice" role="status" hidden></div>
+  <div id="latest-capture" hidden><span id="latest-capture-summary"></span><div class="commands"><button id="latest-batch">查看批次</button><button id="latest-compare">历史对比</button></div></div>
   <main>
     <section id="capture" class="page active">
       <div class="section-heading"><h2>采集任务</h2><span id="hardware" class="muted"></span></div>

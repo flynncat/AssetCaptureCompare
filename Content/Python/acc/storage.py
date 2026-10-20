@@ -68,6 +68,18 @@ class Store:
                 result.append(value)
             return copy.deepcopy(result)
 
+    def history_revision(self):
+        # Poll metadata only; loading every asset record here makes large jobs stall.
+        with self.lock:
+            stamps = []
+            for path in (self.root / "batches").glob("*/batch.json"):
+                try:
+                    stamp = path.stat()
+                    stamps.append((path.parent.name, stamp.st_mtime_ns, stamp.st_size))
+                except FileNotFoundError:
+                    continue
+            return digest([str(self.root), sorted(stamps)])
+
     def capture_path(self, capture_id):
         parts = str(capture_id).split("/")
         if len(parts) != 2 or any(not p or not all(c.isalnum() or c in "_-" for c in p) for p in parts):

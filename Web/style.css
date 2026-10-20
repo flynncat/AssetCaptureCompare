@@ -54,6 +54,8 @@ progress { width: 100%; height: 10px; accent-color: #13766e; }
 #worker-list > div { display: flex; gap: 16px; padding: 5px 0; overflow-wrap: anywhere; }
 #notice { margin: 0; padding: 12px 28px; background: #fff1d9; color: #7c5013; border-bottom: 1px solid #ead8b4; overflow-wrap: anywhere; }
 #notice.error { background: #fff0ef; color: #9e2c32; border-color: #e5c2c2; }
+#latest-capture { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 28px; border-bottom: 1px solid #d9dfe3; background: #fff; font-size: 12px; overflow-wrap: anywhere; }
+#latest-capture .commands { margin: 0; }
 .compare-selectors { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 14px; }
 .comparison-info { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; min-height: 42px; padding: 10px 0; border-top: 1px solid #d9dfe3; margin: 18px 0 14px; }
 .badge { font-size: 12px; color: #0b665f; background: #e7f3ef; padding: 4px 7px; border-radius: 3px; }
