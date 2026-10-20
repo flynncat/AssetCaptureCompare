@@ -56,7 +56,7 @@ with sync_playwright() as playwright:
         page.locator("#view").select_option("front")
         page.locator('[data-mode="slider"]').click()
         expect(page.locator("#slider-right")).to_have_js_property("naturalWidth", 480)
-        page.locator("#split").focus()
+        page.locator("#split-divider").focus()
         page.keyboard.press("ArrowRight")
         page.locator('[data-mode="heat"]').click()
         expect(page.locator("#slider-left")).to_have_js_property("naturalWidth", 480)

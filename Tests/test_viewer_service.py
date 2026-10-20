@@ -63,6 +63,14 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(listing["history_revision"], progress["history_revision"])
         self.assertEqual(listing["batches"][0]["batch_id"], batch["batch_id"])
 
+    def test_movable_toggle_defaults_true_and_persists_static_selection(self):
+        self.assertTrue(self.app.get("/api/state", {})["settings"]["profile"]["movable"])
+        with patch.object(self.app, "editor", return_value={"assets": []}), \
+                patch.object(self.app.scheduler, "start", return_value={"batch_id": "fixture"}) as start:
+            self.app.post("/api/capture", {"paths": ["/Game/Cube.Cube"], "profile": {"movable": False}})
+        self.assertFalse(start.call_args.args[1]["movable"])
+        self.assertFalse(read_json(self.app.settings_file)["profile"]["movable"])
+
     def test_shutdown_requires_token_and_rejects_running_jobs(self):
         with self.assertRaises(urllib.error.HTTPError) as invalid:
             self.post("/api/shutdown", token="invalid")

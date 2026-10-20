@@ -22,7 +22,7 @@ DEFAULT_PROFILE = {
     "padding": 0.0, "views": VIEWS, "warmup_frames": 0,
     "scene": "/AssetCaptureCompare/Maps/CaptureDefault", "hide_floor": True,
     "lod": 0, "exposure": 1.0, "timeout": 240, "orientation": 0.0,
-    "renderer": "final_color_ldr_fxaa_resident_snapshot_movable_v6", "reframe": False, "worker_memory_gib": 24,
+    "renderer": "final_color_ldr_fxaa_resident_snapshot_lighting_v7", "movable": True, "reframe": False, "worker_memory_gib": 24,
 }
 
 
@@ -96,6 +96,9 @@ def file_stamps(paths):
 
 
 def validate_profile(profile):
+    profile.setdefault("movable", True)
+    if not isinstance(profile["movable"], bool):
+        raise ValueError("Movable mode must be a boolean")
     if not 32 <= int(profile["size"]) <= 2000:
         raise ValueError("View size must be between 32 and 2000")
     if not 1 <= int(profile["columns"]) <= 16 or int(profile["size"]) * int(profile["columns"]) > 2000:

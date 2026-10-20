@@ -66,6 +66,15 @@
 - 隔离项目运行 `Tests/mobility_probe_unreal.py`，将临时组件显式设为 Static 后调用正式规则，核验转为 Movable、转换数为 1、类默认对象状态未变化；不保存任何 UE 资产。临时世界数为 0，子编辑器退出码为 0；测试退出前经过与正式 Worker 相同的延迟 GC 边界。
 - 规则在构造完成后、调整朝向与资源就绪检查之前执行，结果保存 `capture_mobility`。渲染环境版本升级至 `final_color_ldr_fxaa_resident_snapshot_movable_v6`，与旧规则的历史结果标记不兼容。
 
+## Movable 光照与悬停分割验证
+
+- 63 项自动测试全部通过，包含模式默认值、布尔参数校验、配置持久化与兼容性、Static 模式的骨骼约束、静态天光转换、保留指定 Cubemap / 原有动态天光范围、资源准备失败后恢复目标隐藏状态。
+- 真实 Cube 对照确认目标原本已为 Movable，黑面来自默认 Static 天光。只转换 Mobility 不足以修复；为转换的场景采集天光设置完整环境采集范围后，背光面同一区域平均 RGB 从 `[0, 0, 0.06]` 变为 `[29.10, 28.28, 47.59]`。方向光、强度及阴影设置未改动。`Tests/lighting_probe_unreal.py` 在独立 Worker 的临时世界输出原配置、Movable、Static 三种结果，不保存资产。
+- 真实两批 `20261020T113109Z_bf8453319991`（Static）与 `20261020T113353Z_8f14b3c570fb`（Movable）各 3/3 成功，覆盖 Cube、用户截图中的 `SK_FarmCrazy_Event_007` 和 `BP_FarmCrazyActorTest`。已检查实际 PNG，问题资产的黑色背光区域恢复可辨认的材质细节。
+- Static 模式中 Cube 为 1 个 Static 组件、BP 为 2 个 Static 组件；骨骼资产保留 1 个 Movable 组件并记录约束例外。Movable 模式全部目标组件及默认天光均核验为 Movable。6 个结果的图片哈希校验通过、临时世界清理后均为 0，仍为每资产 8 帧，无额外渲染预热。完整本机记录在输出目录 `acceptance_mobility_lighting_v7.json`。
+- `Tests/browser_viewport.py` 通过桌面 1920x1080、移动 390x844 检查：无需按键的悬停分割、删除底部滑杆、左右图像方向与批次标签一致、拼图使用全部可用宽度、拼图及单视角滚轮缩放、两图同步变换、鼠标指向的图像坐标固定、画布内不滚动页面而画布外正常滚动、键盘控制分割及无横向溢出。`browser_history.py`、`browser_smoke.py` 和 `browser_comparison_modes.py` 也通过。
+- 服务在原 URL `http://127.0.0.1:51340/` 完成空闲升级，主 UE 编辑器保持运行，最终默认采集配置为 Movable。渲染规则升级为 v7；已有历史图片保留，跨规则或跨模式只进行视觉预览，不报告可比的 SSIM。
+
 ## 范围
 
 正式入口是 UE 的 Window → Asset Capture Compare。宿主引擎和用户资产仍是采集输入；无需项目私有工具或本机 Python。浏览器自动化是可选开发测试，不属于正式运行时依赖。

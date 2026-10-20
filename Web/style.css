@@ -77,10 +77,12 @@ progress { width: 100%; height: 10px; accent-color: #13766e; }
 .image-stage.sheet .image-pane { aspect-ratio: 2 / 1; }
 .image-stage.single { display: block; }
 .image-stage.single > .image-pane { display: none; }
-.slider-stage { position: relative; width: min(100%, 960px); aspect-ratio: 1; margin: auto; background: #1c1e21; overflow: hidden; }
+.slider-stage { position: relative; width: 100%; aspect-ratio: 1; max-height: 75vh; margin: auto; background: #1c1e21; overflow: hidden; touch-action: none; }
 .slider-stage img { display: block; width: 100%; height: 100%; object-fit: contain; }
-#slider-clip { position: absolute; inset: 0; clip-path: inset(0 50% 0 0); }
-.image-stage.sheet .slider-stage { aspect-ratio: 2; }
+#slider-clip { position: absolute; inset: 0; clip-path: inset(0 0 0 50%); }
+.image-stage.sheet .slider-stage { aspect-ratio: 2; max-height: none; }
+#split-divider { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: #fff; box-shadow: 0 0 2px #000; pointer-events: none; }
+#split-divider:focus-visible { outline: 2px solid #328dbe; outline-offset: 2px; }
 .scores { display: flex; flex-wrap: wrap; gap: 0; margin-top: 16px; border-top: 1px solid #d9dfe3; }
 .score { min-width: 130px; padding: 12px 20px 12px 0; font-size: 12px; }
 .score strong { display: block; font-size: 16px; margin-top: 5px; }

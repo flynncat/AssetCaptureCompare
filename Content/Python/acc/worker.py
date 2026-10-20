@@ -16,17 +16,68 @@ def vector(value):
     return [float(value.x), float(value.y), float(value.z)]
 
 
-def make_movable(actor):
+def apply_capture_mobility(actor, movable=True):
     components = [component for child in [actor] + list(actor.get_all_child_actors(True))
                   for component in child.get_components_by_class(unreal.SceneComponent)]
-    changed = sum(component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE
-                  for component in components)
-    for component in components:
-        if component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE:
-            component.set_mobility(unreal.ComponentMobility.MOVABLE)
-    if any(component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE for component in components):
-        raise RuntimeError("A capture component could not be made Movable")
-    return {"policy": "movable", "scene_components": len(components), "changed_components": changed}
+    def needs_movable(component):
+        # UE4 skeletal components cannot have Static mobility, nor can their attached children.
+        parent = component
+        while parent:
+            if isinstance(parent, unreal.SkeletalMeshComponent):
+                return True
+            parent = parent.get_attach_parent()
+        return False
+    expected = [(c, unreal.ComponentMobility.MOVABLE if movable or needs_movable(c) else unreal.ComponentMobility.STATIC)
+                for c in components]
+    changed = sum(c.get_editor_property("mobility") != value for c, value in expected)
+    for component, value in expected:
+        if component.get_editor_property("mobility") != value:
+            component.set_mobility(value)
+    if any(c.get_editor_property("mobility") != value for c, value in expected):
+        raise RuntimeError("Capture component mobility does not match the requested mode")
+    return {"policy": "movable" if movable else "static", "scene_components": len(components),
+            "changed_components": changed, "verified": True,
+            "movable_components": sum(value == unreal.ComponentMobility.MOVABLE for _, value in expected),
+            "static_components": sum(value == unreal.ComponentMobility.STATIC for _, value in expected),
+            "static_unsupported_components": sum(value == unreal.ComponentMobility.MOVABLE for _, value in expected) if not movable else 0}
+
+
+def make_movable(actor):
+    return apply_capture_mobility(actor, True)
+
+
+def configure_capture_lighting(world, movable):
+    lights = []
+    for owner in unreal.AssetCaptureCompareLibrary.get_capture_actors(world):
+        for sky in owner.get_components_by_class(unreal.SkyLightComponent):
+            before = sky.get_editor_property("mobility")
+            distance_before = sky.get_editor_property("sky_distance_threshold")
+            # Static skylights only contribute baked lighting, unavailable to newly spawned targets.
+            if movable and before != unreal.ComponentMobility.MOVABLE:
+                sky.set_mobility(unreal.ComponentMobility.MOVABLE)
+            # A baked sky's distant-only capture can be black in the mobile preview path.
+            # Capture the environment instead; targets are hidden during resource preparation.
+            if movable and before == unreal.ComponentMobility.STATIC and sky.get_editor_property("source_type") == unreal.SkyLightSourceType.SLS_CAPTURED_SCENE:
+                sky.set_editor_property("sky_distance_threshold", 0.0)
+            after = sky.get_editor_property("mobility")
+            if after != unreal.ComponentMobility.STATIC:
+                sky.recapture_sky()
+            lights.append({"actor": owner.get_actor_label(), "before": str(before), "after": str(after),
+                           "sky_distance_before": distance_before,
+                           "sky_distance_after": sky.get_editor_property("sky_distance_threshold")})
+    return {"policy": "dynamic_skylight" if movable else "scene_lighting", "skylights": lights}
+
+
+def prepare_capture_resources(world, actor):
+    targets = [actor] + list(actor.get_all_child_actors(True))
+    hidden = [(target, target.get_editor_property("hidden")) for target in targets]
+    try:
+        for target, _ in hidden:
+            target.set_actor_hidden_in_game(True)
+        return unreal.AssetCaptureCompareLibrary.prepare_resources(world)
+    finally:
+        for target, value in hidden:
+            target.set_actor_hidden_in_game(value)
 
 
 def bounds(actor):
@@ -127,6 +178,7 @@ class Worker:
             if not world:
                 raise RuntimeError("Could not load the frozen capture map")
             native.freeze_capture_time(world, 1.0)
+            lighting = configure_capture_lighting(world, profile.get("movable", True))
             if not getattr(self, "render_configured", False):
                 for command in ("t.IdleWhenNotForeground 0", "r.EnableUseLessCPU 0", "t.MaxFPS 60", "r.VSync 0", "r.MotionBlurQuality 0", "r.DefaultFeature.AntiAliasing 1", "r.PostProcessAAQuality 2",
                                 "r.Streaming.FullyLoadUsedTextures 1", "r.Streaming.UseAllMips 1", "r.ForceLOD 0"):
@@ -143,6 +195,8 @@ class Worker:
                 raise ValueError("Could not create an editor preview actor")
             mobility = make_movable(actor)
             actor.set_actor_rotation(unreal.Rotator(0, profile["orientation"], 0), False)
+            if not profile.get("movable", True):
+                mobility = apply_capture_mobility(actor, False)
             for child in [actor] + list(actor.get_all_child_actors(True)):
                 child.set_actor_tick_enabled(False)
                 for component in child.get_components_by_class(unreal.ActorComponent):
@@ -158,7 +212,7 @@ class Worker:
             if native:
                 yield "waiting_resources"
                 with timings.measure("resources"):
-                    if not native.prepare_resources(world):
+                    if not prepare_capture_resources(world, actor):
                         raise RuntimeError("Shaders or streamed resources are not ready")
             center, extent = bounds(actor)
             baseline = task.get("baseline") or {}
@@ -192,7 +246,7 @@ class Worker:
                       "bounds": {"center": center, "extent": extent}, "framing": framing, "framing_id": framing_id,
                       "framing_reused": reused, "compatibility": task["compatibility"], "source_stamps": source_before,
                       "source_version": task["source_version"], "baseline_id": task.get("baseline_id"),
-                      "capture_mobility": mobility}
+                      "capture_mobility": mobility, "capture_lighting": lighting}
             result["compatibility_details"] = task.get("compatibility_details", {})
             result["render_environment"] = native.get_render_environment() if native else "unverified"
             result["resources_verified"] = bool(native)

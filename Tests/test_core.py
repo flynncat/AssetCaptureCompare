@@ -25,6 +25,13 @@ class FramingTests(unittest.TestCase):
         self.assertEqual(digest(validate_profile(reference)), digest(validate_profile(browser)))
         with self.assertRaises(ValueError):
             validate_profile(dict(reference, warmup_frames=-1))
+        self.assertTrue(DEFAULT_PROFILE["movable"])
+        legacy = dict(reference)
+        legacy.pop("movable")
+        self.assertTrue(validate_profile(legacy)["movable"])
+        self.assertNotEqual(digest(reference), digest(validate_profile(dict(reference, movable=False))))
+        with self.assertRaises(ValueError):
+            validate_profile(dict(reference, movable="false"))
 
     def test_extreme_shapes_fit_all_views(self):
         for center, extent in (([0, 0, 0], [1, 1, 1]), ([5000, -200, 3], [.001, .001, .001]),

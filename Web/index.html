@@ -21,6 +21,7 @@
           <div class="form-row"><label>单视图尺寸<input id="size" type="number" min="32" max="2000" value="480" required></label><label>拼图列数<input id="columns" type="number" min="1" max="16" value="4" required></label></div>
           <div class="form-row"><label>水平 FOV<input id="fov" type="number" min="5" max="120" value="35" step="1"></label><label>Bounds Padding（cm）<input id="padding" type="number" min="0" value="0" step="1"></label></div>
           <div class="form-row"><label>根朝向偏移（°）<input id="orientation" type="number" value="0"></label><label>额外渲染帧数<input id="warmup_frames" type="number" min="0" max="240" value="0"></label></div>
+          <label class="check" title="勾选为 Movable，取消为 Static；骨骼组件按 UE 限制保持 Movable。"><input id="movable" type="checkbox" checked>Movable 模式</label>
           <label class="check"><input id="hide_floor" type="checkbox" checked>采集时隐藏 Floor</label><label class="check"><input id="reframe" type="checkbox">重新自动构图</label>
           <label>输出目录<input id="output-root" required></label><button type="button" id="output-save" class="secondary">切换输出目录</button>
           <div class="commands"><button type="submit" id="capture-start" class="primary">Capture</button><button type="button" id="capture-cancel" disabled>取消任务</button></div>
@@ -45,8 +46,8 @@
       <div id="compare-info" class="comparison-info"></div>
       <div class="toolbar view-toolbar"><label>视角<select id="view"><option value="sheet">汇总拼图</option></select></label><div class="segmented" id="modes"><button data-mode="side" class="active">并排</button><button data-mode="slider">滑动分割</button><button data-mode="diff">绝对差异</button><button data-mode="heat">SSIM 热图</button></div><button id="zoom-out" title="缩小" aria-label="缩小">−</button><output id="zoom-label">100%</output><button id="zoom-in" title="放大" aria-label="放大">+</button><button id="zoom-reset">重置</button></div>
       <div id="image-labels" class="image-labels"><span id="left-caption"></span><span id="right-caption"></span></div>
-      <div id="image-stage" class="image-stage"><div class="image-pane"><img id="left-image" alt="左侧采集结果" hidden draggable="false"></div><div class="image-pane"><img id="right-image" alt="右侧采集结果" hidden draggable="false"></div><div class="slider-stage" hidden><img id="slider-left" alt="左侧采集结果" draggable="false"><div id="slider-clip"><img id="slider-right" alt="右侧采集结果" draggable="false"></div></div></div>
-      <input id="split" type="range" min="0" max="100" value="50" aria-label="对比位置" hidden><div id="scores" class="scores"></div>
+      <div id="image-stage" class="image-stage"><div class="image-pane"><img id="left-image" alt="左侧采集结果" hidden draggable="false"></div><div class="image-pane"><img id="right-image" alt="右侧采集结果" hidden draggable="false"></div><div class="slider-stage" hidden><img id="slider-left" alt="左侧采集结果" draggable="false"><div id="slider-clip"><img id="slider-right" alt="右侧采集结果" draggable="false"></div><div id="split-divider" role="slider" tabindex="0" aria-label="对比位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden></div></div></div>
+      <div id="scores" class="scores"></div>
     </section>
     <section id="batches" class="page">
       <div class="section-heading"><h2>历史批次</h2><button id="reveal">打开输出目录</button></div>

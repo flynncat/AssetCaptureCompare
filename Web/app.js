@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="acc-token"]').content;
-const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], left: null, right: null, comparison: null, pairRevision: 0, comparisonRequest: null, mode: "side", zoom: 1, pan: [0, 0], running: false, calibration: false };
+const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], left: null, right: null, comparison: null, pairRevision: 0, comparisonRequest: null, mode: "side", split: 50, zoom: 1, pan: [0, 0], running: false, calibration: false };
 const labels = { success: "成功", partial: "部分成功", failed: "失败", incomplete: "部分视角无法评分", running: "运行中", cancelled: "已取消", interrupted: "已中断", no_baseline: "无历史基线", incompatible: "配置不兼容", small: "差异较小", review: "建议检查", changed: "差异明显" };
 const viewNames = { front: "正面", front_right: "前斜面", right: "右侧", back: "背面", left: "左侧", back_right: "后斜面", top: "俯视", bottom: "仰视" };
 function workerPhase(worker) {
@@ -42,7 +42,7 @@ $("select-all").onclick = () => { filteredAssets().forEach(a => state.selected.a
 $("select-none").onclick = () => { state.selected.clear(); renderAssets(); };
 async function loadAssets(action) { notice(""); const value = await api("/api/editor", { action, path: $("scan-path").value }); state.assets = value.assets; state.selected = new Set(action === "selection" ? state.assets.map(a => a.path) : []); state.page = 0; renderAssets(); }
 $("selection").onclick = () => safe(() => loadAssets("selection")); $("scan").onclick = () => safe(() => loadAssets("scan"));
-function profile() { return { size: Number($("size").value), columns: Number($("columns").value), fov: Number($("fov").value), padding: Number($("padding").value), orientation: Number($("orientation").value), warmup_frames: Number($("warmup_frames").value), worker_memory_gib: Number($("worker_memory_gib").value), scene: $("scene").value, hide_floor: $("hide_floor").checked, reframe: $("reframe").checked }; }
+function profile() { return { size: Number($("size").value), columns: Number($("columns").value), fov: Number($("fov").value), padding: Number($("padding").value), orientation: Number($("orientation").value), warmup_frames: Number($("warmup_frames").value), worker_memory_gib: Number($("worker_memory_gib").value), scene: $("scene").value, movable: $("movable").checked, hide_floor: $("hide_floor").checked, reframe: $("reframe").checked }; }
 $("capture-form").onsubmit = event => { event.preventDefault(); safe(async () => {
   if (!state.selected.size) throw new Error("请选择需要采集的资产");
   const label = $("label").value;
@@ -145,7 +145,7 @@ function renderImages() {
   const left = viewFile(state.left), right = viewFile(state.right), mode = state.mode, c = state.comparison;
   const single = mode !== "side"; $("image-stage").classList.toggle("single", single); $("image-stage").classList.toggle("sheet", $("view").value === "sheet");
   setImage("left-image", left); setImage("right-image", right);
-  $("image-stage").querySelector(".slider-stage").hidden = !single; $("split").hidden = mode !== "slider";
+  $("image-stage").querySelector(".slider-stage").hidden = !single; $("split-divider").hidden = mode !== "slider";
   $("slider-clip").hidden = mode !== "slider";
   if (mode === "slider") { setImage("slider-left", left); setImage("slider-right", right); }
   else if (mode === "diff" || mode === "heat") {
@@ -154,7 +154,7 @@ function renderImages() {
     if (!url && c?.status === "incompatible") notice("采集环境或相机构图不兼容，无法生成差异图。", true);
   }
   document.querySelectorAll('[data-mode="diff"], [data-mode="heat"]').forEach(e => e.disabled = !canCompare());
-  updateTransform();
+  updateSplit(state.split); updateTransform();
 }
 $("view").onchange = () => { state.zoom = 1; state.pan = [0, 0]; renderImages(); };
 for (const id of ["left-image", "right-image"]) $(id).ondblclick = event => {
@@ -168,10 +168,45 @@ for (const id of ["left-image", "right-image"]) $(id).ondblclick = event => {
   if (view) { $("view").value = view.id; $("view").onchange(); }
 };
 document.querySelectorAll("[data-mode]").forEach(e => e.onclick = () => safe(async () => { state.mode = e.dataset.mode; document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === e)); renderImages(); if (["diff", "heat"].includes(state.mode) && !state.comparison) await calculateComparison(); }));
-$("split").oninput = () => { $("slider-clip").style.clipPath = `inset(0 ${100 - Number($("split").value)}% 0 0)`; };
+function updateSplit(value) {
+  state.split = Math.max(0, Math.min(100, value));
+  $("slider-clip").style.clipPath = `inset(0 0 0 ${state.split}%)`;
+  $("split-divider").style.left = state.split + "%";
+  $("split-divider").setAttribute("aria-valuenow", Math.round(state.split));
+}
+$("split-divider").onkeydown = event => {
+  const delta = { ArrowLeft: -2, ArrowRight: 2, Home: -100, End: 100 }[event.key];
+  if (delta != null) { event.preventDefault(); updateSplit(state.split + delta); }
+};
 function updateTransform() { const transform = `translate(${state.pan[0]}px, ${state.pan[1]}px) scale(${state.zoom})`; for (const id of ["left-image", "right-image", "slider-left", "slider-right"]) $(id).style.transform = transform; $("zoom-label").textContent = `${Math.round(state.zoom * 100)}%`; }
 $("zoom-in").onclick = () => { state.zoom = Math.min(8, state.zoom * 1.25); updateTransform(); }; $("zoom-out").onclick = () => { state.zoom = Math.max(.25, state.zoom / 1.25); updateTransform(); }; $("zoom-reset").onclick = () => { state.zoom = 1; state.pan = [0, 0]; updateTransform(); };
-let dragging = null; $("image-stage").onpointerdown = event => { dragging = [event.clientX, event.clientY, ...state.pan]; $("image-stage").setPointerCapture(event.pointerId); }; $("image-stage").onpointermove = event => { if (dragging) { state.pan = [dragging[2] + event.clientX - dragging[0], dragging[3] + event.clientY - dragging[1]]; updateTransform(); } }; $("image-stage").onpointerup = $("image-stage").onpointercancel = () => { dragging = null; };
+function pointerSplit(event) {
+  const rect = $("image-stage").querySelector(".slider-stage").getBoundingClientRect();
+  if (rect.width) updateSplit(100 * (event.clientX - rect.left) / rect.width);
+}
+let dragging = null;
+$("image-stage").onpointerdown = event => {
+  if (state.mode === "slider" && event.pointerType === "touch") { pointerSplit(event); return; }
+  if (event.button !== 0) return;
+  dragging = [event.clientX, event.clientY, ...state.pan]; $("image-stage").setPointerCapture(event.pointerId);
+};
+$("image-stage").onpointermove = event => {
+  if (dragging) { state.pan = [dragging[2] + event.clientX - dragging[0], dragging[3] + event.clientY - dragging[1]]; updateTransform(); }
+  else if (state.mode === "slider") pointerSplit(event);
+};
+$("image-stage").onpointerup = $("image-stage").onpointercancel = () => { dragging = null; };
+$("image-stage").addEventListener("wheel", event => {
+  if (!state.left && !state.right) return;
+  event.preventDefault();
+  const pane = event.target.closest(".image-pane, .slider-stage") || $("image-stage");
+  const rect = pane.getBoundingClientRect(), old = state.zoom;
+  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1);
+  state.zoom = Math.max(.25, Math.min(8, old * Math.exp(-delta * .0015)));
+  const ratio = state.zoom / old, point = [event.clientX - rect.left - rect.width / 2, event.clientY - rect.top - rect.height / 2];
+  state.pan = point.map((p, i) => p - (p - state.pan[i]) * ratio);
+  if (state.mode === "slider") pointerSplit(event);
+  updateTransform();
+}, { passive: false });
 $("copy-link").onclick = () => safe(async () => { const params = new URLSearchParams({ left: $("left-asset").value, right: $("right-asset").value, view: $("view").value }); await navigator.clipboard.writeText(location.origin + "/?" + params); notice("对比链接已复制"); });
 async function openAsset(asset) { tab("compare"); $("right-batch").value = asset.capture_id.split("/")[0]; assetOptions("right", asset.capture_id); $("use-baseline").checked = true; await loadPair(); if (state.left && state.right?.status === "success") $("run-compare").click(); }
 function matchesBatch(batch, q) { return [batch.label, batch.batch_id, localTime(batch.created_at), batch.finished_at && localTime(batch.finished_at)].filter(Boolean).some(v => v.toLowerCase().includes(q)); }
@@ -279,6 +314,7 @@ async function init() {
   $("hardware").textContent = `${value.machine.cpu_physical} 核 · ${value.machine.memory_gib} GiB · ${value.machine.gpu.name}`;
   $("concurrency").value = value.settings.concurrency; $("output-root").value = value.root;
   for (const id of ["size", "columns", "fov", "padding", "orientation", "warmup_frames", "worker_memory_gib", "scene"]) $(id).value = value.settings.profile[id]; $("hide_floor").checked = value.settings.profile.hide_floor;
+  $("movable").checked = value.settings.profile.movable !== false;
   state.renderer = value.settings.profile.renderer;
   if (value.calibration) renderCalibration(value.calibration);
   await refresh();

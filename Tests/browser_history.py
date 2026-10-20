@@ -83,6 +83,7 @@ with sync_playwright() as playwright:
 
     def capture(route):
         assert route.request.post_data_json["label"] == "Submitted label"
+        assert route.request.post_data_json["profile"]["movable"] is False
         listing.update(batches=[created, third, current, old], history_revision="four")
         route.fulfill(json={"batch_id": created["batch_id"]})
 
@@ -91,6 +92,8 @@ with sync_playwright() as playwright:
     page.locator("#selection").click()
     expect(page.locator("#asset-count")).to_contain_text("1 已选")
     page.locator("#label").fill("Submitted label")
+    expect(page.locator("#movable")).to_be_checked()
+    page.locator("#movable").uncheck()
     page.locator("#capture-start").click()
     expect(page.locator("#latest-capture-summary")).to_contain_text("Submitted label")
     expect(page.locator("#right-batch")).to_have_value(created["batch_id"])
