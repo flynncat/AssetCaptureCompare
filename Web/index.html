@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="acc-token" content="__ACC_TOKEN__">
+  <title>Asset Capture Compare</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><div><h1>Asset Capture Compare</h1><span id="connection" class="status">连接中</span></div><nav aria-label="主导航"><button data-tab="capture" class="active">Capture</button><button data-tab="compare">历史对比</button><button data-tab="batches">批次管理</button></nav><button id="refresh">刷新</button></header>
+  <div id="notice" role="status" hidden></div>
+  <main>
+    <section id="capture" class="page active">
+      <div class="section-heading"><h2>采集任务</h2><span id="hardware" class="muted"></span></div>
+      <div class="capture-layout">
+        <form id="capture-form" class="settings">
+          <label>批次标签<input id="label" placeholder="批次名称" maxlength="120"></label>
+          <div class="form-row"><label>采集并发数<input id="concurrency" type="number" min="1" max="16" step="1" value="1" required></label><div class="recommendation" id="recommendation">尚未校准</div></div>
+          <label>单 Worker 内存上限（GiB）<input id="worker_memory_gib" type="number" min="4" max="128" step="1" value="24" required></label>
+          <label>采集场景<input id="scene" required></label>
+          <div class="form-row"><label>单视图尺寸<input id="size" type="number" min="32" max="2000" value="480" required></label><label>拼图列数<input id="columns" type="number" min="1" max="16" value="4" required></label></div>
+          <div class="form-row"><label>水平 FOV<input id="fov" type="number" min="5" max="120" value="35" step="1"></label><label>Bounds Padding（cm）<input id="padding" type="number" min="0" value="0" step="1"></label></div>
+          <div class="form-row"><label>根朝向偏移（°）<input id="orientation" type="number" value="0"></label><label>额外渲染帧数<input id="warmup_frames" type="number" min="0" max="240" value="0"></label></div>
+          <label class="check"><input id="hide_floor" type="checkbox" checked>采集时隐藏 Floor</label><label class="check"><input id="reframe" type="checkbox">重新自动构图</label>
+          <label>输出目录<input id="output-root" required></label><button type="button" id="output-save" class="secondary">切换输出目录</button>
+          <div class="commands"><button type="submit" id="capture-start" class="primary">Capture</button><button type="button" id="capture-cancel" disabled>取消任务</button></div>
+        </form>
+        <div class="asset-section">
+          <div class="toolbar"><button id="selection">读取 UE 所选资产</button><input id="scan-path" value="/Game" aria-label="资产目录"><button id="scan">扫描目录</button></div>
+          <div class="toolbar"><input id="asset-search" type="search" placeholder="搜索资产名称或路径" aria-label="搜索资产"><button id="select-all">全选筛选结果</button><button id="select-none">清空选择</button><span id="asset-count" class="muted">0 个资产</span></div>
+          <div class="asset-head"><span>资产</span><span>类型</span></div><div id="asset-list" class="asset-list"></div>
+          <div class="pagination"><button id="asset-prev" title="上一页" aria-label="上一页">←</button><span id="asset-page"></span><button id="asset-next" title="下一页" aria-label="下一页">→</button></div>
+          <div class="section-heading"><h3>当前进度</h3><span id="progress-summary" class="muted">未运行</span></div><progress id="progress" value="0" max="1"></progress><div id="worker-list"></div>
+          <div class="section-heading"><h3>并发校准</h3><span id="calibration-state" class="muted"></span></div>
+          <div class="toolbar"><label>最大测试并发<input id="calibration-max" type="number" min="2" max="8" value="4"></label><button id="calibrate">测量所选资产</button><button id="calibrate-cancel" hidden>取消校准</button></div><div id="calibration-results"></div>
+        </div>
+      </div>
+    </section>
+    <section id="compare" class="page">
+      <div class="section-heading"><h2>历史对比</h2><span id="compare-summary" class="muted"></span></div>
+      <div class="compare-selectors"><label>左侧批次<select id="left-batch"></select></label><label>右侧批次<select id="right-batch"></select></label></div>
+      <div class="compare-selectors"><label>左侧资产<select id="left-asset"></select></label><label>右侧资产<select id="right-asset"></select></label></div>
+      <div class="toolbar"><label class="check"><input id="use-baseline" type="checkbox" checked>使用右侧资产的历史基线</label><button id="run-compare" class="primary">计算对比</button><button id="copy-link">复制对比链接</button></div>
+      <div class="toolbar"><label>差异较小阈值<input id="threshold-small" type="number" min="-1" max="1" step="0.001" value="0.99"></label><label>建议检查阈值<input id="threshold-review" type="number" min="-1" max="1" step="0.001" value="0.97"></label></div>
+      <div id="compare-info" class="comparison-info"></div>
+      <div class="toolbar view-toolbar"><label>视角<select id="view"><option value="sheet">汇总拼图</option></select></label><div class="segmented" id="modes"><button data-mode="side" class="active">并排</button><button data-mode="slider">滑动分割</button><button data-mode="diff">绝对差异</button><button data-mode="heat">SSIM 热图</button></div><button id="zoom-out" title="缩小" aria-label="缩小">−</button><output id="zoom-label">100%</output><button id="zoom-in" title="放大" aria-label="放大">+</button><button id="zoom-reset">重置</button></div>
+      <div id="image-labels" class="image-labels"><span id="left-caption"></span><span id="right-caption"></span></div>
+      <div id="image-stage" class="image-stage"><div class="image-pane"><img id="left-image" alt="左侧采集结果" hidden draggable="false"></div><div class="image-pane"><img id="right-image" alt="右侧采集结果" hidden draggable="false"></div><div class="slider-stage" hidden><img id="slider-left" alt="左侧采集结果" draggable="false"><div id="slider-clip"><img id="slider-right" alt="右侧采集结果" draggable="false"></div></div></div>
+      <input id="split" type="range" min="0" max="100" value="50" aria-label="对比位置" hidden><div id="scores" class="scores"></div>
+    </section>
+    <section id="batches" class="page">
+      <div class="section-heading"><h2>历史批次</h2><button id="reveal">打开输出目录</button></div>
+      <div class="toolbar"><input id="batch-search" type="search" placeholder="批次、资产名称或路径" aria-label="搜索历史"><select id="batch-status" aria-label="过滤批次状态"><option value="">全部状态</option><option value="success">全部成功</option><option value="partial">部分成功</option><option value="failed">失败</option><option value="running">运行中</option><option value="cancelled">已取消</option><option value="interrupted">已中断</option></select><span id="batch-count" class="muted"></span></div>
+      <div class="toolbar"><select id="result-filter" aria-label="差异提示"><option value="">全部差异</option><option value="changed">差异明显</option><option value="review">建议检查</option><option value="small">差异较小</option><option value="incomplete">部分视角无法评分</option><option value="incompatible">配置不兼容</option><option value="no_baseline">无历史基线</option><option value="failed">失败记录</option></select><select id="result-sort" aria-label="结果排序"><option value="time">时间倒序</option><option value="score">最差 SSIM 优先</option></select></div>
+      <div id="batch-list"></div>
+      <div class="pagination"><button id="batch-prev" title="上一页" aria-label="上一页">←</button><span id="batch-page"></span><button id="batch-next" title="下一页" aria-label="下一页">→</button></div>
+    </section>
+  </main>
+  <dialog id="delete-dialog"><form method="dialog"><h2>删除历史批次</h2><p id="delete-description"></p><div class="commands"><button value="cancel">取消</button><button value="confirm" class="danger">删除批次</button></div></form></dialog>
+  <script src="/app.js"></script>
+</body></html>

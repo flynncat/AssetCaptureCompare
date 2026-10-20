@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.runtime/
+.runtime-install-*/
+.downloads/
+Packages/
+Config/runtime.json
+Tests/artifacts/
+Binaries/
+Intermediate/
+Content/ACCWork/

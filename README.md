@@ -1,0 +1,104 @@
+# Asset Capture Compare
+
+独立的 UE4.26 编辑器插件，用固定场景采集 Mesh / Actor Blueprint，保留历史批次，并通过本地网页对比任意两次结果。它不调用优化器，也不修改源资产。
+
+## 安装
+
+插件放在项目 `Plugins/AssetCaptureCompare/` 下。依赖仅包括引擎的 PythonScriptPlugin、EditorScriptingUtilities，以及插件自己的原生辅助模块。
+
+1. 编译原生模块（首次安装或 C++ 更新后执行）：
+
+```powershell
+.\Scripts\build_native.ps1 -Engine 'C:\UE4.26' -Project 'C:\Projects\MyProject\MyProject.uproject'
+```
+
+2. 安装便携比较运行时，无需预装系统 Python。脚本从 Python 官方与 PyPI 下载锁定版本并校验 SHA256，解释器、标准库及所有图像依赖均安装在插件 `.runtime/`：
+
+```powershell
+.\Scripts\setup_runtime.ps1
+```
+
+工具只使用插件 `.runtime/python.exe`，不读取 `ACC_PYTHON`、全局 Python、用户级包目录或外部虚拟环境。安装完成后可整体搬移插件，不需要联网；源码仓库不提交运行时二进制，首次安装需要联网。下载缓存位于插件 `.downloads/`，保留缓存时可用 `setup_runtime.ps1 -Offline` 重装。
+
+3. 重启编辑器，使用顶部 **窗口 / Window → Asset Capture Compare** 打开本地网页界面。插件在内容浏览器的插件内容中提供 `Maps/CaptureDefault` 场景。
+
+默认场景已随插件提供，来自当前引擎 Default 模板。若需要在匹配引擎上重新生成，可使用 `Tools/initialize_scene.py`；它使用子编辑器，不切换主编辑器关卡。
+
+## 使用
+
+1. 在内容浏览器选择已保存的 Static Mesh、Skeletal Mesh 或 Actor BP，打开插件网页，点击“读取 UE 所选资产”。也可以扫描 UE 内容目录并勾选资产。
+2. 设置批次标签、采集场景及“采集并发数”，点击 Capture。第一次使用尚未校准时，临时默认并发为 1。
+3. 每个 Worker 在独立临时预览世界里加载一个资产，计算联合包围盒、采集 8 个角度、清理世界；图片和 SSIM 在独立比较服务中处理。
+4. “历史对比”默认选同一资产上一次成功采集；可取消历史基线选项，分别选择左右批次和资产。支持并排、滑动分割、绝对差异、SSIM 热图和同步缩放。
+5. “批次管理”可查看与整批删除历史。删除仅影响图片及派生对比缓存，不删除源资产。
+
+批次管理支持差异筛选、最低 SSIM 排序、逐批记录分页和失败项重试。重试创建新批次；删除确认显示占用空间。
+
+默认输出到项目 `Saved/AssetCaptureCompare/`；网页可切换输出目录。每批 `batch.json`、配置、场景快照、逐资产 `capture.json`、8 张单视图、1920×960 拼图及日志均独立保存。
+
+## 并发校准
+
+选择代表性资产，点击“测量所选资产”。至少选择 10 个，正式验收使用至少 50 个。工具先预热，再逐档测试 1 到指定最大并发，每档运行 3 次；记录包含进程启动及收尾的耗时、资源峰值和重复采集 SSIM。
+
+推荐值只取稳定档位；耗时在最快值 5% 以内时优先较低并发。保留用户手动设置。不同规模 BP、后台程序和主编辑器占用可能影响资源余量，推荐结果不是固定硬件理论值。稳定性要求 ROI SSIM ≥ 0.995；无法完整评分的薄片资产只有在兼容构图和环境下、全部原图哈希及文件校验一致时才作为稳定样本。
+
+界面可设置每个 Worker 的内存上限，默认 24 GiB；启动前按当前 RAM/VRAM 余量限制并发。运行中出现内存压力会在资产边界减少调度并发并记录原因，Worker 超出上限会在边界回收。源文件在 Worker 启动后发生变化时，先更新 Worker，再读取资产，防止复用旧的内存版本。
+
+普通 Mesh、参考姿态的 Skeletal Mesh 和静态 BP 默认“额外渲染帧数”为 0，每个视角仅渲染一次。静态相机不保留跨帧渲染历史，使用 FXAA 与固定曝光，避免帧序号影响快照。纹理完整驻留、Shader 就绪及场景资源同步仍会检查；这些加载检查与重复渲染预热不同。位于 Effect 目录的 Mesh 也按实际 Mesh 处理，不根据名称推断需要预热。额外渲染帧只重复绘制冻结状态，不会推进粒子、动画或 BeginPlay；时间相关特效的模拟预热尚未纳入本版。TAA、自动曝光、动画、物理或粒子模拟的时间收敛需求需要单独定义后支持。
+
+每个 Worker 使用独立 `-UserDir`，从主项目复制已保存的用户配置及资产注册缓存，避免多个编辑器争用 `CachedAssetRegistry.bin`。临时缓存位于批次 `worker_runtime/`，Worker 退出后删除；启动预检会计算复制缓存所需空间。内容、插件及源项目路径不变。Worker 关闭 Python API 提示文件生成及 Python 内容浏览器集成；主编辑器不受这些进程参数影响。
+
+Worker 在一个批次中连续处理资产，正常资产缓存增长不再触发固定 4 GiB 阈值回收，仍执行配置的内存上限及源文件变化保护。同步 PNG 导出后不再额外等待一个引擎 tick；每次 Capture 的渲染同步及每资产卸载后的检查仍保留。每条 `capture.json` 记录 `timings`、`capture_seconds`、`rendered_frames`，批次资产记录补充图片处理、发布及 SSIM 耗时；`batch.json` 的 `metrics.worker_startups` 记录每次启动耗时、配置及缓存准备耗时与独立日志。网页进度显示当前阶段及启动等待秒数。
+
+历史索引按当前批次增量更新，恢复及读取外部修改时仍可完整重建。原图像素完全一致时直接得到数学上精确的 SSIM = 1，仍生成差异图、热图及保留 ROI 过小判定；有变化的图片继续执行完整 SSIM 计算。
+
+采集子进程禁用 RenderDocPlugin，避免项目的自动抓帧设置干扰无窗口批量采集；主编辑器的 RenderDoc 配置保持不变。批次记录同时工作的 Worker 峰值及任务重叠时长，校准不认可未达到请求并发数的档位。
+
+## 独立查看器
+
+UE 退出后仍可启动服务，查看已有批次并重新比较图片：
+
+```powershell
+.\.runtime\python.exe .\Scripts\serve.py --root 'C:\Captures\AssetCaptureCompare'
+```
+
+服务仅绑定 `127.0.0.1`，自动选择空闲端口并打开浏览器。不提供远程托管。
+
+网页服务独立于 UE 进程。更新插件 Python 代码后，从 UE 菜单再次打开工具会检查服务加载的代码版本；空闲时通过经过验证的退出请求切换到新版服务，采集或校准期间拒绝切换。首次从不支持此协议的旧版升级时，按错误提示关闭对应 PID 的 Python 查看器进程一次，再重新打开工具。
+
+## 支持边界
+
+- 使用磁盘已保存状态；目标及相关依赖有未保存修改时阻止启动。
+- BP 使用构造完成后的静态状态，不执行 BeginPlay、Lua 游戏流程或物理模拟。无可见几何、抽象类、编译错误和仅运行时生成几何的 BP 明确失败。
+- 裸 Skeletal Mesh 使用固定参考姿态；BP 中的组件保持构造姿态并停止动画。
+- 默认地面在 Capture 中隐藏，以支持仰视；场景地图中的地面保留。
+- 初版支持单个持久关卡的采集场景；带流送子关卡的场景明确拒绝。
+- 修改场景、视角、渲染设置或构图会产生不兼容提示，不用缩放或对齐图片掩盖变化。
+- SSIM 使用 RGB 三通道、固定参数与两个投影包围盒的联合 ROI；显示最差视角分数。分数表示差异，不判断美术质量。
+- 薄片在侧面等视角的 ROI 小于 SSIM 窗口时，保留有效角度的分数及所有差异图，明确标记无效角度，不生成完整主分数。网页可调整差异提示阈值，每次比较记录其实际值。
+- 当前批次使用地图及 BuiltData 快照；用户保存原地图只影响下一批。未快照的共享环境依赖发生变化时中止当前批次。
+- 完整地图快照不包含所有源资产备份，历史查看以 PNG 为准。
+
+## 验证
+
+```powershell
+.\.runtime\python.exe -m unittest discover -s Tests -p 'test_*.py' -v
+.\.runtime\python.exe Scripts/verify_runtime.py
+.\.runtime\python.exe Tools/performance_smoke.py http://127.0.0.1:<port> --source-batch <batch_id>
+```
+
+`Tests/browser_smoke.py` 是可选浏览器开发测试，需要另外安装 Playwright 和浏览器；正式功能及上述单元测试不需要它。`Tools/remote.py` 仅用于开发时连接同一引擎目录的本机编辑器；正式功能不依赖 Python 远程执行。测试记录见 `Docs/Validation.md`。
+
+## 分发与依赖
+
+插件目录包含默认地图、Python 代码、原生模块源码、网页静态文件、安装与打包脚本，无项目私有工具、共享脚本或 CDN 依赖。采集必须使用宿主 UE4.26、其内置 PythonScriptPlugin / EditorScriptingUtilities 和用户项目中的待采集资产；输入项目与输出历史目录属于业务数据，不是外部工具代码。
+
+源码安装需要与目标 UE 对应的 C++ 构建工具，原生 DLL 应针对目标引擎编译。已编译的分发包仍须与接收方引擎构建兼容；自定义引擎之间不保证二进制兼容。
+
+编译并安装运行时后，可生成包含 `.runtime`、原生 DLL、默认地图、网页和全部工具脚本的离线插件 ZIP：
+
+```powershell
+.\Scripts\package_plugin.ps1 -Destination '.\Packages\AssetCaptureCompare-Win64.zip'
+```
+
+将 ZIP 内的 `AssetCaptureCompare` 文件夹放入目标项目 `Plugins/` 即可，不需要原机器的 Python、下载缓存或源码目录。默认地图可由用户在插件内容中编辑；历史输出位于项目 `Saved/`，不随插件打包。第三方解释器及库的许可证随运行时的 `LICENSE`、`*.dist-info` 等目录保留。
