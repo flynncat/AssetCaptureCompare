@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="acc-token"]').content;
-const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], left: null, right: null, comparison: null, pairRevision: 0, comparisonRequest: null, mode: "side", split: 50, zoom: 1, pan: [0, 0], running: false, calibration: false };
+const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], historyAssets: new Map(), batchAssets: new Map(), left: null, right: null, comparison: null, pairRevision: 0, comparisonRequest: null, mode: "side", split: 50, zoom: 1, pan: [0, 0], running: false, calibration: false };
 const labels = { success: "成功", partial: "部分成功", failed: "失败", incomplete: "部分视角无法评分", running: "运行中", cancelled: "已取消", interrupted: "已中断", no_baseline: "无历史基线", incompatible: "配置不兼容", small: "差异较小", review: "建议检查", changed: "差异明显" };
 const viewNames = { front: "正面", front_right: "前斜面", right: "右侧", back: "背面", left: "左侧", back_right: "后斜面", top: "俯视", bottom: "仰视" };
 function workerPhase(worker) {
@@ -22,7 +22,7 @@ function tab(name) { document.querySelectorAll(".page").forEach(e => e.classList
 document.querySelectorAll("[data-tab]").forEach(e => e.onclick = () => safe(async () => {
   tab(e.dataset.tab);
   if (e.dataset.tab !== "capture") await refresh();
-  if (e.dataset.tab === "compare" && (!state.right || state.right.capture_id !== $("right-asset").value || state.left?.capture_id !== $("left-asset").value)) await loadPair();
+  if (e.dataset.tab === "compare" && (!state.right || state.right.capture_id !== batchAsset("right")?.capture_id || state.left?.capture_id !== batchAsset("left")?.capture_id)) await loadPair();
 }));
 function filteredAssets() { const q = $("asset-search").value.toLowerCase(); return state.assets.filter(a => a.path.toLowerCase().includes(q)); }
 function renderAssets() {
@@ -51,7 +51,7 @@ $("capture-form").onsubmit = event => { event.preventDefault(); safe(async () =>
     const value = await api("/api/capture", { paths: [...state.selected], profile: profile(), concurrency: Number($("concurrency").value), label });
     notice("采集任务已创建：" + (label || value.batch_id) + " · " + value.batch_id);
     await refresh(true);
-    $("right-batch").value = value.batch_id; assetOptions("right");
+    $("right-batch").value = value.batch_id; refreshCompareAssets();
     state.left = state.right = state.comparison = null; ++state.pairRevision; renderImages();
   } finally { state.submitting = false; $("capture-start").disabled = state.running; }
 }); };
@@ -63,22 +63,37 @@ function refreshSelectors() {
   const choices = state.batches.map(b => ({ value: b.batch_id, label: `${b.label} · ${localTime(b.created_at)}` }));
   const oldLeft = $("left-batch").value, oldRight = $("right-batch").value;
   options($("left-batch"), choices, oldLeft || choices[1]?.value); options($("right-batch"), choices, oldRight || choices[0]?.value);
-  assetOptions("left"); assetOptions("right");
+  refreshCompareAssets();
 }
-function assetOptions(side, wanted) {
-  const batch = state.batches.find(b => b.batch_id === $(side + "-batch").value), old = wanted || $(side + "-asset").value;
-  const previous = state.batches.flatMap(b => b.assets).find(a => a.capture_id === old);
-  const same = batch?.assets.find(a => a.capture_id === old || a.path === previous?.path);
-  const selected = same?.capture_id ?? (previous ? "" : batch?.assets[0]?.capture_id || "");
-  options($(side + "-asset"), [{ value: "", label: "未选择资产" }, ...(batch?.assets || []).map(a => ({ value: a.capture_id, label: `${a.name} · ${labels[a.status] || a.status} · ${a.path}` }))], selected);
+function assetKey(asset) { return asset?.identity || asset?.path || ""; }
+function batchAsset(side) {
+  return state.batchAssets.get($(side + "-batch").value)?.get(assetKey(state.compareAsset));
+}
+function refreshCompareAssets(wanted) {
+  if (wanted !== undefined) state.compareAsset = wanted;
+  const values = state.historyAssets;
+  if (state.compareAsset === undefined && values.size) state.compareAsset = values.values().next().value;
+  const q = $("compare-asset-search").value.trim().toLowerCase();
+  const filtered = [...values.values()].filter(a => `${a.name} ${a.path}`.toLowerCase().includes(q));
+  $("compare-asset-count").textContent = `${filtered.length} / ${values.size} 个资产`;
+  const pinned = state.compareAsset && !filtered.some(a => assetKey(a) === assetKey(state.compareAsset));
+  const choices = pinned ? [state.compareAsset, ...filtered] : filtered;
+  const describe = asset => {
+    const status = side => {
+      const record = state.batchAssets.get($(side + "-batch").value)?.get(assetKey(asset));
+      return record ? labels[record.status] || record.status : "无记录";
+    };
+    return `${pinned && assetKey(asset) === assetKey(state.compareAsset) ? "当前 · " : ""}${asset.name} · 左：${status("left")} / 右：${status("right")} · ${asset.path}`;
+  };
+  options($("compare-asset"), [{ value: "", label: "请选择资产" }, ...choices.map(a => ({ value: assetKey(a), label: describe(a) }))], assetKey(state.compareAsset));
 }
 async function pickBaseline() {
-  if (!$("use-baseline").checked) return true;
-  const rightID = $("right-asset").value; const asset = state.batches.flatMap(b => b.assets).find(a => a.capture_id === rightID);
-  if (!asset?.baseline_id) { state.left = null; notice("此资产没有历史基线，可关闭基线选项手动选择。"); return false; }
+  if (!$("use-baseline").checked || !state.compareAsset) return true;
+  const asset = batchAsset("right");
+  if (!asset?.baseline_id) { notice("此资产在右侧批次没有历史基线，可取消自动选择后指定左侧批次。"); return false; }
   const batch = state.batches.find(b => b.batch_id === asset.baseline_id.split("/")[0]);
-  if (!batch || !batch.assets.some(a => a.capture_id === asset.baseline_id && a.status === "success")) { state.left = null; notice("历史基线已删除，可手动选择其他记录。"); return false; }
-  $("left-batch").value = batch.batch_id; assetOptions("left", asset.baseline_id);
+  if (!batch || !batch.assets.some(a => a.capture_id === asset.baseline_id && a.status === "success" && assetKey(a) === assetKey(asset))) { notice("历史基线已删除，可手动选择其他批次。"); return false; }
+  $("left-batch").value = batch.batch_id; refreshCompareAssets();
   return true;
 }
 async function loadPair() {
@@ -89,26 +104,37 @@ async function loadPair() {
   $("run-compare").disabled = true;
   renderImages();
   const hasLeft = await pickBaseline();
-  const values = await Promise.all([hasLeft && $("left-asset").value ? api("/api/capture?id=" + encodeURIComponent($("left-asset").value)).catch(() => null) : null, $("right-asset").value ? api("/api/capture?id=" + encodeURIComponent($("right-asset").value)).catch(() => null) : null]);
+  const left = hasLeft && batchAsset("left"), right = batchAsset("right");
+  const values = await Promise.all([left ? api("/api/capture?id=" + encodeURIComponent(left.capture_id)).catch(() => null) : null, right ? api("/api/capture?id=" + encodeURIComponent(right.capture_id)).catch(() => null) : null]);
   if (revision !== state.pairRevision) return;
-  [state.left, state.right] = values; if ($("use-baseline").checked && !state.batches.flatMap(b => b.assets).find(a => a.capture_id === $("right-asset").value)?.baseline_id) state.left = null;
+  [state.left, state.right] = values;
   const views = state.right?.views || state.left?.views || []; const old = $("view").value;
   options($("view"), [{ value: "sheet", label: "汇总拼图" }, ...views.map(v => ({ value: v.id, label: viewNames[v.id] || v.id }))], old);
-  $("left-caption").textContent = state.left ? `${state.left.path} · ${localTime(state.left.finished_at)}` : "无左侧采集结果"; $("right-caption").textContent = state.right ? `${state.right.path} · ${localTime(state.right.finished_at)}` : "无右侧采集结果";
+  for (const side of ["left", "right"]) {
+    const capture = state[side], record = side === "left" ? left : right;
+    $(side + "-caption").textContent = capture ? `${capture.path} · ${labels[capture.status] || capture.status}${capture.finished_at ? " · " + localTime(capture.finished_at) : ""}` : !state.compareAsset ? "未选择资产" : record ? "采集记录无法读取" : `${side === "left" ? "左" : "右"}侧批次无此资产记录`;
+  }
   $("scores").replaceChildren(); $("compare-info").replaceChildren();
   $("compare-summary").textContent = [state.left, state.right].filter(Boolean).map(c => { const b = state.batches.find(b => b.batch_id === c.capture_id.split("/")[0]); return `${b?.label || ""} · ${b?.profile.size || ""}px · FOV ${b?.profile.fov || ""}`; }).join(" / ");
   if (!state.left && state.right) $("compare-info").append(text("span", "仅右侧", "badge review"));
   if (state.left && !state.right) $("compare-info").append(text("span", "仅左侧", "badge review"));
+  if (state.compareAsset && !state.left && !state.right) $("compare-info").append(text("span", "所选批次无可用采集记录", "badge review"));
   renderImages();
   $("run-compare").disabled = !canCompare();
   if (canCompare() && ["diff", "heat"].includes(state.mode)) await calculateComparison();
 }
 for (const side of ["left", "right"]) {
-  $(side + "-batch").onchange = () => safe(async () => { if (side === "left") $("use-baseline").checked = false; assetOptions(side); await loadPair(); });
-  $(side + "-asset").onchange = () => safe(async () => { if (side === "left") $("use-baseline").checked = false; if (side === "right" && !$("use-baseline").checked) { const counterpart = state.batches.find(b => b.batch_id === $("left-batch").value)?.assets.find(a => a.path === state.batches.flatMap(b => b.assets).find(a => a.capture_id === $("right-asset").value)?.path); $("left-asset").value = counterpart?.capture_id || ""; } await loadPair(); });
+  $(side + "-batch").onchange = () => safe(async () => { if (side === "left") $("use-baseline").checked = false; refreshCompareAssets(); await loadPair(); });
 }
+$("compare-asset-search").oninput = () => refreshCompareAssets();
+$("compare-asset").onchange = () => safe(async () => {
+  const key = $("compare-asset").value;
+  state.compareAsset = key ? state.historyAssets.get(key) || state.compareAsset : null;
+  state.zoom = 1; state.pan = [0, 0];
+  await loadPair();
+});
 $("use-baseline").onchange = () => safe(loadPair);
-function canCompare() { return state.left?.status === "success" && state.right?.status === "success"; }
+function canCompare() { return state.left?.status === "success" && state.right?.status === "success" && assetKey(state.left) === assetKey(state.right); }
 async function calculateComparison() {
   if (!canCompare()) throw new Error("请选择两侧完整采集记录");
   const revision = state.pairRevision;
@@ -212,8 +238,8 @@ $("image-stage").addEventListener("wheel", event => {
   if (state.mode === "slider") pointerSplit(event);
   updateTransform();
 }, { passive: false });
-$("copy-link").onclick = () => safe(async () => { const params = new URLSearchParams({ left: $("left-asset").value, right: $("right-asset").value, view: $("view").value }); await navigator.clipboard.writeText(location.origin + "/?" + params); notice("对比链接已复制"); });
-async function openAsset(asset) { tab("compare"); $("right-batch").value = asset.capture_id.split("/")[0]; assetOptions("right", asset.capture_id); $("use-baseline").checked = true; await loadPair(); if (state.left && state.right?.status === "success") $("run-compare").click(); }
+$("copy-link").onclick = () => safe(async () => { const params = new URLSearchParams({ asset: assetKey(state.compareAsset), left: $("left-batch").value, right: $("right-batch").value, view: $("view").value }); await navigator.clipboard.writeText(location.origin + "/?" + params); notice("对比链接已复制"); });
+async function openAsset(asset) { tab("compare"); $("right-batch").value = asset.capture_id.split("/")[0]; $("compare-asset-search").value = ""; refreshCompareAssets(asset); $("use-baseline").checked = true; await loadPair(); if (canCompare()) $("run-compare").click(); }
 function matchesBatch(batch, q) { return [batch.label, batch.batch_id, localTime(batch.created_at), batch.finished_at && localTime(batch.finished_at)].filter(Boolean).some(v => v.toLowerCase().includes(q)); }
 function matchedAssets(batch) {
   const filter = $("result-filter").value, q = $("batch-search").value.toLowerCase();
@@ -293,6 +319,15 @@ async function refresh(force = false) {
   if (historyRequest) { if (!force) return historyRequest; await historyRequest; }
   historyRequest = (async () => {
     const value = await api("/api/batches"); state.batches = value.batches; state.historyRevision = value.history_revision;
+    state.historyAssets = new Map(); state.batchAssets = new Map();
+    for (const batch of state.batches) {
+      const records = new Map();
+      for (const asset of batch.assets) {
+        const key = assetKey(asset); records.set(key, asset);
+        if (!state.historyAssets.has(key)) state.historyAssets.set(key, asset);
+      }
+      state.batchAssets.set(batch.batch_id, records);
+    }
     refreshSelectors(); renderBatches(); renderLatestCapture();
   })().finally(() => { historyRequest = null; });
   return historyRequest;
@@ -323,7 +358,17 @@ async function init() {
   state.renderer = value.settings.profile.renderer;
   if (value.calibration) renderCalibration(value.calibration);
   await refresh();
-  const query = new URLSearchParams(location.search); if (query.has("right")) { tab("compare"); $("use-baseline").checked = false; for (const side of ["left", "right"]) { const id = query.get(side); if (id) { $(side + "-batch").value = id.split("/")[0]; assetOptions(side, id); } } await loadPair(); $("view").value = query.get("view") || "sheet"; renderImages(); }
+  const query = new URLSearchParams(location.search);
+  if (query.has("right")) {
+    tab("compare"); $("use-baseline").checked = false;
+    for (const side of ["left", "right"]) { const id = query.get(side); if (id) $(side + "-batch").value = id.split("/")[0]; }
+    const assets = state.batches.flatMap(b => b.assets);
+    const wanted = query.has("asset") ? assets.find(a => assetKey(a) === query.get("asset")) : assets.find(a => a.capture_id === query.get("right")) || assets.find(a => a.capture_id === query.get("left"));
+    refreshCompareAssets(wanted || null);
+    if (!wanted) notice("链接中的资产不存在或采集记录已删除。", true);
+    else if (!query.has("asset") && assets.some(a => a.capture_id === query.get("left") && assetKey(a) !== assetKey(wanted))) notice("旧链接包含不同资产，现已按右侧资产匹配两侧批次。");
+    await loadPair(); $("view").value = query.get("view") || "sheet"; renderImages();
+  }
   const schedulePoll = async () => { try { await safe(poll); } finally { setTimeout(schedulePoll, 1500); } }; await schedulePoll();
 }
 safe(init);

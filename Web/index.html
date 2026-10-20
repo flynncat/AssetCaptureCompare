@@ -40,8 +40,8 @@
     <section id="compare" class="page">
       <div class="section-heading"><h2>历史对比</h2><span id="compare-summary" class="muted"></span></div>
       <div class="compare-selectors"><label>左侧批次<select id="left-batch"></select></label><label>右侧批次<select id="right-batch"></select></label></div>
-      <div class="compare-selectors"><label>左侧资产<select id="left-asset"></select></label><label>右侧资产<select id="right-asset"></select></label></div>
-      <div class="toolbar"><label class="check"><input id="use-baseline" type="checkbox" checked>使用右侧资产的历史基线</label><button id="run-compare" class="primary">计算对比</button><button id="copy-link">复制对比链接</button></div>
+      <div class="compare-selectors"><label>查找资产<input id="compare-asset-search" type="search" aria-label="查找资产" placeholder="资产名称或完整路径"><span id="compare-asset-count" class="muted" role="status"></span></label><label>对比资产<select id="compare-asset" aria-describedby="compare-asset-count"></select></label></div>
+      <div class="toolbar"><label class="check"><input id="use-baseline" type="checkbox" checked>自动选择上次采集批次</label><button id="run-compare" class="primary">计算对比</button><button id="copy-link">复制对比链接</button></div>
       <div class="toolbar"><label>差异较小阈值<input id="threshold-small" type="number" min="-1" max="1" step="0.001" value="0.99"></label><label>建议检查阈值<input id="threshold-review" type="number" min="-1" max="1" step="0.001" value="0.97"></label></div>
       <div id="compare-info" class="comparison-info"></div>
       <div class="toolbar view-toolbar"><label>视角<select id="view"><option value="sheet">汇总拼图</option></select></label><div class="segmented" id="modes" role="group" aria-label="对比模式"><button data-mode="side" class="active" aria-pressed="true">并排</button><button data-mode="slider" aria-pressed="false">滑动分割</button><button data-mode="diff" aria-pressed="false">绝对差异</button><button data-mode="heat" aria-pressed="false">SSIM 热图</button></div><button id="zoom-out" title="缩小" aria-label="缩小">−</button><output id="zoom-label">100%</output><button id="zoom-in" title="放大" aria-label="放大">+</button><button id="zoom-reset">重置</button></div>

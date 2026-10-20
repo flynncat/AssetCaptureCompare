@@ -75,7 +75,7 @@ with sync_playwright() as playwright:
     page.locator('[data-mode="heat"]').click()
     page.wait_for_timeout(200)
     assert delayed, "Expected a comparison request"
-    page.locator("#left-asset").select_option("")
+    page.locator("#compare-asset").select_option("")
     expect(page.locator("#run-compare")).to_be_disabled()
     for route, response in delayed:
         route.fulfill(response=response)
