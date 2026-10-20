@@ -29,6 +29,14 @@ def machine_info():
             "gpu": gpu_info()}
 
 
+def expansion_blocked(available_gib, worker_peak_gib, gpu, worker_gpu_mib):
+    if available_gib < 8 + worker_peak_gib * 1.2:
+        return "RAM headroom"
+    if "total_mib" in gpu and gpu["total_mib"] - gpu["used_mib"] < 256 + worker_gpu_mib * 1.2:
+        return "VRAM headroom"
+    return None
+
+
 def prepare_worker_user_dir(project, directory):
     project, directory = Path(project).parent, Path(directory)
     for source in (project / "Saved/Config/Windows").glob("*.ini"):
@@ -120,23 +128,17 @@ class Scheduler:
             if self.running:
                 raise ValueError("A Capture batch is already running")
             validate_profile(profile)
-            if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 16:
-                raise ValueError("Capture concurrency must be an integer between 1 and 16")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("Capture concurrency limit must be a positive integer")
             machine = machine_info()
-            budget = max(1, min(16, int((machine["available_gib"] - 8) // 16)))
-            gpu = machine["gpu"]
-            if "total_mib" in gpu:
-                budget = min(budget, max(1, (gpu["total_mib"] - gpu["used_mib"] - 256) // 512))
-            if count > budget:
-                raise ValueError("Requested {} workers exceeds the current RAM/VRAM budget ({})".format(count, budget))
             cache = Path(prepared["project"]).parent / "Intermediate/CachedAssetRegistry.bin"
-            cache_bytes = cache.stat().st_size * count if cache.is_file() else 0
+            cache_bytes = cache.stat().st_size if cache.is_file() else 0
             if shutil.disk_usage(self.store.root).free < len(prepared["assets"]) * profile["size"] ** 2 * len(profile["views"]) * 8 + cache_bytes + 1024 ** 3:
                 raise ValueError("Not enough free disk space")
             self.cancel_event.clear()
             context = {"engine": prepared["engine"], "project": prepared["project"], "engine_version": prepared["engine_version"],
                        "plugin_version": prepared["plugin_version"], "machine": machine,
-                       "requested_concurrency": count, "actual_concurrency": count}
+                       "requested_concurrency": count, "actual_concurrency": 1}
             batch = self.store.new_batch(prepared["assets"], profile, context, label, retry_of, cancel_event, on_progress)
             if cancel_event and cancel_event.is_set():
                 self.mark_remaining(batch, "Cancelled by user", "cancelled")
@@ -295,10 +297,8 @@ class Scheduler:
             batch["compatibility"] = compatibility
             self.store.save_batch(batch)
             scene_snapshot_seconds = time.monotonic() - started
-            for index in range(count):
-                if self.cancel_event.is_set():
-                    break
-                self.workers.append(self.launch(work, index, batch, work / scene_map.name))
+            if not self.cancel_event.is_set():
+                self.workers.append(self.launch(work, 0, batch, work / scene_map.name))
             self.phase = "capturing"
             pending = list(batch["assets"])
             attempts = {}
@@ -310,6 +310,10 @@ class Scheduler:
             sampled_at = 0
             previous_cycle = time.monotonic()
             gpu_sample = {}
+            worker_peak_gib = 0
+            worker_gpu_mib = 512
+            gpu_baseline = batch["context"]["machine"]["gpu"].get("used_mib", 0)
+            scaling_reason = "Waiting for worker measurement"
             progress_at = 0
             while pending or any(w["asset"] for w in self.workers):
                 if self.cancel_event.is_set():
@@ -318,12 +322,15 @@ class Scheduler:
                     if future.done():
                         future.result()
                 futures = [f for f in futures if not f.done()]
-                if time.monotonic() - sampled_at > 2:
+                sampled = time.monotonic() - sampled_at > 2
+                if sampled:
                     sampled_at = time.monotonic()
                     rss = 0
                     for w in self.workers:
                         try:
-                            rss += psutil.Process(w["process"].pid).memory_info().rss
+                            worker_rss = psutil.Process(w["process"].pid).memory_info().rss
+                            rss += worker_rss
+                            worker_peak_gib = max(worker_peak_gib, worker_rss / 1024 ** 3)
                         except psutil.NoSuchProcess:
                             pass
                     metrics["peak_worker_rss_gib"] = max(metrics["peak_worker_rss_gib"], round(rss / 1024 ** 3, 2))
@@ -332,6 +339,9 @@ class Scheduler:
                     metrics["peak_system_cpu_percent"] = max(metrics["peak_system_cpu_percent"], psutil.cpu_percent())
                     gpu_sample = gpu_info()
                     metrics["peak_gpu_used_mib"] = max(metrics["peak_gpu_used_mib"], gpu_sample.get("used_mib", 0))
+                    live = sum(w["process"].poll() is None for w in self.workers)
+                    if live and "used_mib" in gpu_sample:
+                        worker_gpu_mib = max(worker_gpu_mib, (gpu_sample["used_mib"] - gpu_baseline) / live)
                 if file_stamps(live_scene_files) != scene_stamps:
                     fatal = "Scene dependencies changed during capture"
                     self.cancel_event.set()
@@ -396,7 +406,7 @@ class Scheduler:
                     elif worker["asset"] and time.monotonic() - worker["assigned"] > batch["profile"]["timeout"]:
                         process.kill()
                     if worker["asset"] is None and pending and not self.cancel_event.is_set():
-                        if len(futures) >= max(2, count):
+                        if len(futures) >= max(2, sum(not w.get("disabled") for w in self.workers)):
                             worker["phase"] = "processing_images"
                             continue
                         healthy = sum(not w.get("disabled") for w in self.workers)
@@ -404,11 +414,13 @@ class Scheduler:
                         if healthy > 1 and (psutil.virtual_memory().available < 6 * 1024 ** 3 or gpu_pressure):
                             path.with_suffix(".stop").touch()
                             worker["disabled"] = True
+                            worker["resource_retired"] = True
                             metrics["concurrency_changes"].append({"elapsed_seconds": time.monotonic() - started,
                                 "from": healthy, "to": healthy - 1, "reason": "RAM/VRAM pressure"})
                             batch["context"]["actual_concurrency"] = healthy - 1
                             continue
                         rss = psutil.Process(process.pid).memory_info().rss
+                        worker_peak_gib = max(worker_peak_gib, rss / 1024 ** 3)
                         next_stamps = file_stamps(pending[0]["files"])
                         changed_source = any(worker["source_stamps"].get(p) != stamp for p, stamp in next_stamps.items())
                         if rss > batch["profile"]["worker_memory_gib"] * 1024 ** 3 or changed_source:
@@ -448,6 +460,33 @@ class Scheduler:
                     self.cancel_event.set()
                 if self.cancel_event.is_set():
                     break
+                healthy = [w for w in self.workers if not w.get("disabled")]
+                live_count = sum(w["process"].poll() is None for w in self.workers)
+                # Measure loaded workers before admitting one more editor process.
+                if sampled and pending and len(healthy) < count:
+                    scaling_reason = "Waiting for worker measurement"
+                    if live_count == len(healthy) and all(w["ready"] and w["completed"] for w in healthy):
+                        scaling_reason = expansion_blocked(psutil.virtual_memory().available / 1024 ** 3,
+                                                           worker_peak_gib, gpu_sample, worker_gpu_mib)
+                        cache = Path(prepared["project"]).parent / "Intermediate/CachedAssetRegistry.bin"
+                        cache_bytes = cache.stat().st_size if cache.is_file() else 0
+                        if not scaling_reason and shutil.disk_usage(self.store.root).free < cache_bytes + 1024 ** 3:
+                            scaling_reason = "Disk headroom"
+                        if not scaling_reason and len(futures) < max(2, len(healthy)):
+                            reusable = next((w for w in self.workers if w.get("resource_retired")), None)
+                            index = reusable["index"] if reusable else len(self.workers)
+                            added = self.launch(work, index, batch, work / scene_map.name)
+                            if reusable:
+                                reusable.clear()
+                                reusable.update(added)
+                            else:
+                                self.workers.append(added)
+                            metrics["concurrency_changes"].append({"elapsed_seconds": time.monotonic() - started,
+                                "from": len(healthy), "to": len(healthy) + 1, "reason": "Measured resource headroom"})
+                            batch["context"]["actual_concurrency"] = max(batch["context"]["actual_concurrency"], len(healthy) + 1)
+                            self.store.save_batch(batch, force=False)
+                        elif not scaling_reason:
+                            scaling_reason = "Image processing backpressure"
                 now = time.monotonic()
                 busy = sum(bool(w["asset"]) and not w.get("disabled") and w.get("phase") not in ("starting", "idle")
                            for w in self.workers)
@@ -459,7 +498,8 @@ class Scheduler:
                     progress_at = now
                     write_json(batch_dir / "progress.json", {"workers": [{"index": w["index"], "pid": w["process"].pid,
                         "phase": w.get("phase"), "startup_seconds": now - w["started"] if not w["ready"] else None,
-                        "path": w["asset"]["path"] if w["asset"] else None} for w in self.workers],
+                        "path": w["asset"]["path"] if w["asset"] else None} for w in self.workers if not w.get("disabled")],
+                        "concurrency_reason": scaling_reason if pending and len(healthy) < count else None,
                         "elapsed_seconds": time.monotonic() - started})
                 self.cancel_event.wait(0.02)
         except Exception as error:
@@ -523,7 +563,9 @@ class Scheduler:
             return {"running": False}
         completed = sum(a["status"] in ("success", "failed", "cancelled", "interrupted") for a in batch["assets"])
         value = dict(progress, running=True, batch_id=batch["batch_id"], total=len(batch["assets"]), completed=completed,
-                     phase=self.phase, cancelling=self.cancel_event.is_set())
+                     phase=self.phase, cancelling=self.cancel_event.is_set(),
+                     concurrency_limit=batch["context"]["requested_concurrency"],
+                     actual_concurrency=sum(not w.get("disabled") and w["process"].poll() is None for w in self.workers))
         if not summary:
             value["batch"] = copy.deepcopy(self.store.compact(batch))
         return value

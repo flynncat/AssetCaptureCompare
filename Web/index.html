@@ -14,7 +14,7 @@
       <div class="capture-layout">
         <form id="capture-form" class="settings">
           <label>批次标签<input id="label" placeholder="批次名称" maxlength="120"></label>
-          <div class="form-row"><label>采集并发数<input id="concurrency" type="number" min="1" max="16" step="1" value="1" required></label><div class="recommendation" id="recommendation">尚未校准</div></div>
+          <div class="form-row"><label>采集并发上限<input id="concurrency" type="number" min="1" step="1" value="1" required></label><div class="recommendation" id="recommendation">尚未校准</div></div>
           <label>单 Worker 内存上限（GiB）<input id="worker_memory_gib" type="number" min="4" max="128" step="1" value="24" required></label>
           <label>采集场景<input id="scene" required></label>
           <div class="form-row"><label>单视图尺寸<input id="size" type="number" min="32" max="2000" value="480" required></label><label>拼图列数<input id="columns" type="number" min="1" max="16" value="4" required></label></div>

@@ -5,11 +5,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Content/Python"))
 from acc.common import DEFAULT_PROFILE, write_json
-from acc.scheduler import Scheduler
+from acc.scheduler import Scheduler, expansion_blocked
 from acc.storage import Store
 from acc.compare import contact_sheet
 
@@ -128,7 +129,7 @@ class SchedulerFaultTests(unittest.TestCase):
         self.assertTrue(all(a["status"] != "success" for a in result["assets"]))
 
     def test_parallel_capture_records_overlapping_worker_activity(self):
-        batch = self.start(["Hang_A", "Hang_B"], count=2)
+        batch = self.start(["Healthy", "Hang_A", "Hang_B"], count=2)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if len(self.scheduler.workers) == 2 and all(w.get("phase") == "capturing" for w in self.scheduler.workers):
@@ -140,6 +141,93 @@ class SchedulerFaultTests(unittest.TestCase):
         result = self.finish(batch)
         self.assertEqual(result["metrics"]["peak_busy_workers"], 2)
         self.assertGreater(result["metrics"]["parallel_overlap_seconds"], 0)
+
+    def test_requested_limit_above_old_budget_runs_with_lower_concurrency(self):
+        real_process = __import__("psutil").Process
+
+        def process_with_memory(pid):
+            process = real_process(pid)
+            process.memory_info = lambda: SimpleNamespace(rss=16 * 1024 ** 3)
+            return process
+
+        with patch("acc.scheduler.psutil.virtual_memory", return_value=SimpleNamespace(
+                available=25 * 1024 ** 3, total=64 * 1024 ** 3)), patch(
+                "acc.scheduler.psutil.Process", side_effect=process_with_memory):
+            batch = self.start(["Healthy", "Hang", "Queued"], count=4)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                progress = self.scheduler.progress(summary=True)
+                if progress.get("concurrency_reason") == "RAM headroom":
+                    break
+                time.sleep(.02)
+            self.assertEqual(progress.get("concurrency_reason"), "RAM headroom")
+            self.assertEqual(progress["concurrency_limit"], 4)
+            self.assertEqual(progress["actual_concurrency"], 1)
+            self.assertEqual(len(self.scheduler.workers), 1)
+            self.scheduler.cancel()
+            result = self.finish(batch)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["assets"][0]["status"], "success")
+
+    def test_parallel_limit_increases_gradually_and_never_exceeds_cap(self):
+        with patch("acc.scheduler.psutil.virtual_memory", return_value=SimpleNamespace(
+                available=64 * 1024 ** 3, total=128 * 1024 ** 3)):
+            batch = self.finish(self.start(["Slow" + str(i) for i in range(80)], count=3), timeout=20)
+        self.assertEqual(batch["status"], "success")
+        increases = [c for c in batch["metrics"]["concurrency_changes"] if c["to"] > c["from"]]
+        self.assertEqual([(c["from"], c["to"]) for c in increases], [(1, 2), (2, 3)])
+        self.assertEqual(batch["metrics"]["peak_busy_workers"], 3)
+        self.assertEqual(batch["context"]["requested_concurrency"], 3)
+        self.assertLessEqual(batch["context"]["actual_concurrency"], 3)
+
+    def test_concurrency_input_accepts_large_positive_limit(self):
+        batch = self.finish(self.start(["Healthy"], count=1000))
+        self.assertEqual(batch["status"], "success")
+        self.assertEqual(batch["context"]["requested_concurrency"], 1000)
+        self.assertEqual(len(self.scheduler.workers), 1)
+        for invalid in (0, -1, True, 1.5):
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                self.start(["Healthy"], count=invalid)
+
+    def test_resource_pressure_reduces_workers_and_recovery_can_expand_again(self):
+        available = [64]
+        with patch("acc.scheduler.psutil.virtual_memory", side_effect=lambda: SimpleNamespace(
+                available=available[0] * 1024 ** 3, total=128 * 1024 ** 3)):
+            batch = self.start(["Slow" + str(i) for i in range(100)], count=2)
+            deadline = time.monotonic() + 8
+            while self.scheduler.progress(summary=True).get("actual_concurrency", 0) < 2 and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(self.scheduler.progress(summary=True)["actual_concurrency"], 2)
+            available[0] = 5
+            while not any(w.get("resource_retired") for w in self.scheduler.workers) and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(any(w.get("resource_retired") for w in self.scheduler.workers))
+            available[0] = 64
+            result = self.finish(batch, timeout=20)
+        self.assertEqual(result["status"], "success")
+        changes = result["metrics"]["concurrency_changes"]
+        self.assertEqual([(c["from"], c["to"]) for c in changes], [(1, 2), (2, 1), (1, 2)])
+        self.assertEqual(result["metrics"]["peak_busy_workers"], 2)
+
+    def test_expansion_uses_measured_memory_and_gpu_headroom(self):
+        gpu = {"total_mib": 10240, "used_mib": 8000}
+        self.assertIsNone(expansion_blocked(20, 8, gpu, 600))
+        self.assertEqual(expansion_blocked(20, 16, gpu, 600), "RAM headroom")
+        self.assertEqual(expansion_blocked(64, 16, gpu, 2000), "VRAM headroom")
+        self.assertIsNone(expansion_blocked(64, 16, {"name": "unavailable"}, 2000))
+
+    def test_calibration_skips_higher_levels_when_actual_workers_stay_lower(self):
+        from acc.calibration import Calibration
+        scheduler = Mock()
+        scheduler.store.root = self.root
+        scheduler.start.return_value = {"batch_id": "simulated"}
+        scheduler.store.batch.return_value = {"batch_id": "simulated", "status": "success", "elapsed_seconds": 1,
+            "context": {"actual_concurrency": 1, "machine": {}}, "metrics": {}, "assets": []}
+        calibration = Calibration(scheduler)
+        calibration.run({"assets": []}, self.profile, 4)
+        self.assertEqual(calibration.result["recommended"], 1)
+        self.assertEqual(scheduler.start.call_count, 5)
+        self.assertIn("measured active workers 1", calibration.result["resource_limit"])
 
     def test_asset_cache_growth_below_memory_limit_keeps_worker(self):
         real_process = __import__("psutil").Process

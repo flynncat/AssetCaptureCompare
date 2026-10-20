@@ -18,6 +18,8 @@ while not job.with_suffix(".stop").exists():
     task = read_json(path)
     path.unlink()
     write_json(job.with_suffix(".status.json"), {"phase": "capturing", "pid": os.getpid()})
+    if "Slow" in task["path"]:
+        time.sleep(.2)
     if "CrashOnce" in task["path"]:
         marker = job.parent / "crashed_once"
         if not marker.exists():

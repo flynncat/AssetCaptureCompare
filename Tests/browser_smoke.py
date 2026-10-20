@@ -22,6 +22,10 @@ with sync_playwright() as playwright:
     page.goto(args.url)
     page.locator("#connection").filter(has_text="UE 已连接").wait_for()
     expect(page.locator("#warmup_frames")).to_have_attribute("min", "0")
+    expect(page.locator("label").filter(has=page.locator("#concurrency"))).to_contain_text("采集并发上限")
+    assert page.locator("#concurrency").get_attribute("max") is None
+    page.locator("#concurrency").fill("32")
+    assert page.locator("#concurrency").evaluate("input => input.checkValidity()")
     page.get_by_role("button", name="扫描目录", exact=True).click()
     page.locator(".asset-row").first.wait_for()
     assert page.locator(".asset-row").count() <= 50

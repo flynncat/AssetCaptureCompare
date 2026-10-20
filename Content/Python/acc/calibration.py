@@ -94,6 +94,9 @@ class Calibration:
                         stable = False
                     if batch["context"].get("actual_concurrency", count) != count:
                         stable = False
+                        result["resource_limit"] = "Requested ceiling {}; measured active workers {}. Higher levels were skipped.".format(
+                            count, batch["context"].get("actual_concurrency", 1))
+                        break
                     if count > 1 and batch.get("metrics", {}).get("peak_busy_workers", 0) < count:
                         stable = False
                     exact_count = 0
