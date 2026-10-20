@@ -59,6 +59,13 @@
 - 历史缓存按需补齐汇总差异图；单元测试验证布局、逐视角像素、空白格、缺失热图修复、ROI 过小仍可显示，以及不兼容配置不生成误导性图片。后台逐资产 SSIM 不额外生成汇总差异图。
 - `Tests/browser_comparison_modes.py` 验证桌面和移动端分别先点两种模式、拼图与单视角往返切换、图片实际加载及可见性、计算期间切换资产后忽略旧响应。完整浏览器回归同时覆盖并排、滑动及历史管理。
 
+## Mobility 规则验证
+
+- 57 项自动测试通过，新增目标 Actor、递归子 Actor、Static / Stationary 组件转为 Movable，以及已有 Movable 组件保留状态的验证。
+- 真实 UE 批次 `20261020T091624Z_1e4f5a7ccbd4` 中，1 个 Static Mesh、1 个 Skeletal Mesh 和 2 个 BP 均成功，清理后的临时世界数量全部为 0。此组资产原本已是 Movable，`changed_components` 均为 0，验证现有采集不回归。
+- 隔离项目运行 `Tests/mobility_probe_unreal.py`，将临时组件显式设为 Static 后调用正式规则，核验转为 Movable、转换数为 1、类默认对象状态未变化；不保存任何 UE 资产。临时世界数为 0，子编辑器退出码为 0；测试退出前经过与正式 Worker 相同的延迟 GC 边界。
+- 规则在构造完成后、调整朝向与资源就绪检查之前执行，结果保存 `capture_mobility`。渲染环境版本升级至 `final_color_ldr_fxaa_resident_snapshot_movable_v6`，与旧规则的历史结果标记不兼容。
+
 ## 范围
 
 正式入口是 UE 的 Window → Asset Capture Compare。宿主引擎和用户资产仍是采集输入；无需项目私有工具或本机 Python。浏览器自动化是可选开发测试，不属于正式运行时依赖。

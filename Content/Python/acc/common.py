@@ -22,7 +22,7 @@ DEFAULT_PROFILE = {
     "padding": 0.0, "views": VIEWS, "warmup_frames": 0,
     "scene": "/AssetCaptureCompare/Maps/CaptureDefault", "hide_floor": True,
     "lod": 0, "exposure": 1.0, "timeout": 240, "orientation": 0.0,
-    "renderer": "final_color_ldr_fxaa_resident_snapshot_v5", "reframe": False, "worker_memory_gib": 24,
+    "renderer": "final_color_ldr_fxaa_resident_snapshot_movable_v6", "reframe": False, "worker_memory_gib": 24,
 }
 
 

@@ -16,6 +16,19 @@ def vector(value):
     return [float(value.x), float(value.y), float(value.z)]
 
 
+def make_movable(actor):
+    components = [component for child in [actor] + list(actor.get_all_child_actors(True))
+                  for component in child.get_components_by_class(unreal.SceneComponent)]
+    changed = sum(component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE
+                  for component in components)
+    for component in components:
+        if component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE:
+            component.set_mobility(unreal.ComponentMobility.MOVABLE)
+    if any(component.get_editor_property("mobility") != unreal.ComponentMobility.MOVABLE for component in components):
+        raise RuntimeError("A capture component could not be made Movable")
+    return {"policy": "movable", "scene_components": len(components), "changed_components": changed}
+
+
 def bounds(actor):
     actors = [actor] + list(actor.get_all_child_actors(True))
     boxes = []
@@ -128,6 +141,7 @@ class Worker:
                 actor = native.spawn_capture_asset(world, source)
             if not actor:
                 raise ValueError("Could not create an editor preview actor")
+            mobility = make_movable(actor)
             actor.set_actor_rotation(unreal.Rotator(0, profile["orientation"], 0), False)
             for child in [actor] + list(actor.get_all_child_actors(True)):
                 child.set_actor_tick_enabled(False)
@@ -177,7 +191,8 @@ class Worker:
                       "class": task["class"], "started_at": utcnow(), "status": "success", "views": [], "worker_pid": os.getpid(),
                       "bounds": {"center": center, "extent": extent}, "framing": framing, "framing_id": framing_id,
                       "framing_reused": reused, "compatibility": task["compatibility"], "source_stamps": source_before,
-                      "source_version": task["source_version"], "baseline_id": task.get("baseline_id")}
+                      "source_version": task["source_version"], "baseline_id": task.get("baseline_id"),
+                      "capture_mobility": mobility}
             result["compatibility_details"] = task.get("compatibility_details", {})
             result["render_environment"] = native.get_render_environment() if native else "unverified"
             result["resources_verified"] = bool(native)
