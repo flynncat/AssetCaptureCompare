@@ -56,7 +56,34 @@ class Comparer:
         self.store = store
         self.lock = threading.RLock()
 
-    def compare(self, left_id, right_id, thresholds=None, cancel_event=None):
+    def ensure_sheets(self, directory, result, capture, cancel_event=None):
+        if result["status"] not in ("success", "incomplete"):
+            return
+        paths = [directory / ("sheet_" + mode + ".png") for mode in ("diff", "heat")]
+        if all(path.is_file() for path in paths):
+            return
+        with Image.open(self.store.capture_path(capture["capture_id"]) / "contact_sheet.png") as image:
+            sheet_size = image.size
+        with Image.open(directory / (result["views"][0]["id"] + "_diff.png")) as image:
+            width, height = image.size
+        columns = max(1, sheet_size[0] // width)
+        for mode, path in zip(("diff", "heat"), paths):
+            if path.is_file():
+                continue
+            sheet = Image.new("RGB", sheet_size, "black")
+            for index, view in enumerate(result["views"]):
+                if cancel_event and cancel_event.is_set():
+                    raise InterruptedError("Comparison cancelled")
+                with Image.open(directory / (view["id"] + "_" + mode + ".png")) as image:
+                    sheet.paste(image, ((index % columns) * width, (index // columns) * height))
+            temporary = path.with_suffix(".tmp")
+            try:
+                sheet.save(temporary, format="PNG", compress_level=1)
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def compare(self, left_id, right_id, thresholds=None, cancel_event=None, include_sheets=False):
         thresholds = thresholds or [0.99, 0.97]
         if (len(thresholds) != 2 or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
                 and math.isfinite(v) and -1 <= v <= 1 for v in thresholds) or thresholds[0] < thresholds[1]):
@@ -70,6 +97,8 @@ class Comparer:
             directory = contained(self.store.root, "comparisons/" + key)
             cached = read_json(directory / "comparison.json")
             if cached:
+                if include_sheets:
+                    self.ensure_sheets(directory, cached, left, cancel_event)
                 return cached
             result = {"comparison_id": key, "created_at": utcnow(), "left": left_id, "right": right_id,
                       "parameters": PARAMETERS, "thresholds": thresholds,
@@ -121,4 +150,6 @@ class Comparer:
                                   mean=float(np.mean([v["score"] for v in result["views"]])),
                                   category="small" if worst["score"] >= thresholds[0] else "review" if worst["score"] >= thresholds[1] else "changed")
             write_json(directory / "comparison.json", result)
+            if include_sheets:
+                self.ensure_sheets(directory, result, left, cancel_event)
             return result

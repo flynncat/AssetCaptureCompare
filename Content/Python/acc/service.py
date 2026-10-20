@@ -212,7 +212,7 @@ class Application:
             return {"ok": True}
         if route == "/api/compare":
             with self.store.lock:
-                return self.scheduler.comparer.compare(data["left"], data["right"], data.get("thresholds"))
+                return self.scheduler.comparer.compare(data["left"], data["right"], data.get("thresholds"), include_sheets=True)
         if route == "/api/delete":
             self.store.delete_batch(data["batch_id"])
             return {"ok": True}

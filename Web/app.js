@@ -1,7 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="acc-token"]').content;
-const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], left: null, right: null, comparison: null, mode: "side", zoom: 1, pan: [0, 0], running: false, calibration: false };
+const state = { assets: [], selected: new Set(), page: 0, batchPage: 0, batches: [], left: null, right: null, comparison: null, pairRevision: 0, comparisonRequest: null, mode: "side", zoom: 1, pan: [0, 0], running: false, calibration: false };
 const labels = { success: "成功", partial: "部分成功", failed: "失败", incomplete: "部分视角无法评分", running: "运行中", cancelled: "已取消", interrupted: "已中断", no_baseline: "无历史基线", incompatible: "配置不兼容", small: "差异较小", review: "建议检查", changed: "差异明显" };
 const viewNames = { front: "正面", front_right: "前斜面", right: "右侧", back: "背面", left: "左侧", back_right: "后斜面", top: "俯视", bottom: "仰视" };
 function workerPhase(worker) {
@@ -67,9 +67,15 @@ async function pickBaseline() {
   return true;
 }
 async function loadPair() {
+  const revision = ++state.pairRevision;
   state.comparison = null;
+  state.comparisonRequest = null;
+  state.left = state.right = null;
+  $("run-compare").disabled = true;
+  renderImages();
   const hasLeft = await pickBaseline();
   const values = await Promise.all([hasLeft && $("left-asset").value ? api("/api/capture?id=" + encodeURIComponent($("left-asset").value)).catch(() => null) : null, $("right-asset").value ? api("/api/capture?id=" + encodeURIComponent($("right-asset").value)).catch(() => null) : null]);
+  if (revision !== state.pairRevision) return;
   [state.left, state.right] = values; if ($("use-baseline").checked && !state.batches.flatMap(b => b.assets).find(a => a.capture_id === $("right-asset").value)?.baseline_id) state.left = null;
   const views = state.right?.views || state.left?.views || []; const old = $("view").value;
   options($("view"), [{ value: "sheet", label: "汇总拼图" }, ...views.map(v => ({ value: v.id, label: viewNames[v.id] || v.id }))], old);
@@ -79,17 +85,34 @@ async function loadPair() {
   if (!state.left && state.right) $("compare-info").append(text("span", "仅右侧", "badge review"));
   if (state.left && !state.right) $("compare-info").append(text("span", "仅左侧", "badge review"));
   renderImages();
+  $("run-compare").disabled = !canCompare();
+  if (canCompare() && ["diff", "heat"].includes(state.mode)) await calculateComparison();
 }
 for (const side of ["left", "right"]) {
   $(side + "-batch").onchange = () => safe(async () => { if (side === "left") $("use-baseline").checked = false; assetOptions(side); await loadPair(); });
   $(side + "-asset").onchange = () => safe(async () => { if (side === "left") $("use-baseline").checked = false; if (side === "right" && !$("use-baseline").checked) { const counterpart = state.batches.find(b => b.batch_id === $("left-batch").value)?.assets.find(a => a.path === state.batches.flatMap(b => b.assets).find(a => a.capture_id === $("right-asset").value)?.path); $("left-asset").value = counterpart?.capture_id || ""; } await loadPair(); });
 }
 $("use-baseline").onchange = () => safe(loadPair);
-$("run-compare").onclick = () => safe(async () => {
-  if (!state.left || !state.right) throw new Error("请选择两侧完整采集记录");
+function canCompare() { return state.left?.status === "success" && state.right?.status === "success"; }
+async function calculateComparison() {
+  if (!canCompare()) throw new Error("请选择两侧完整采集记录");
+  const revision = state.pairRevision;
+  const data = { left: state.left.capture_id, right: state.right.capture_id, thresholds: [Number($("threshold-small").value), Number($("threshold-review").value)] };
+  const key = JSON.stringify([revision, data]);
+  if (state.comparisonRequest?.key === key) return state.comparisonRequest.promise;
   $("run-compare").disabled = true; notice("正在计算 SSIM…");
-  try { state.comparison = await api("/api/compare", { left: state.left.capture_id, right: state.right.capture_id, thresholds: [Number($("threshold-small").value), Number($("threshold-review").value)] }); renderComparison(); notice(""); } finally { $("run-compare").disabled = false; }
-});
+  const request = { key };
+  request.promise = (async () => {
+    const comparison = await api("/api/compare", data);
+    if (revision !== state.pairRevision || state.comparisonRequest !== request) return;
+    state.comparison = comparison; notice(""); renderComparison();
+  })().finally(() => {
+    if (state.comparisonRequest === request) { state.comparisonRequest = null; $("run-compare").disabled = !canCompare(); }
+  });
+  state.comparisonRequest = request;
+  return request.promise;
+}
+$("run-compare").onclick = () => safe(calculateComparison);
 function renderComparison() {
   const c = state.comparison; $("compare-info").replaceChildren(); $("scores").replaceChildren(); if (!c) return;
   $("compare-info").append(text("span", labels[c.category || c.status] || c.status, "badge " + (c.category || c.status)));
@@ -111,9 +134,11 @@ function renderImages() {
   $("slider-clip").hidden = mode !== "slider";
   if (mode === "slider") { setImage("slider-left", left); setImage("slider-right", right); }
   else if (mode === "diff" || mode === "heat") {
-    const url = ["success", "incomplete"].includes(c?.status) && $("view").value !== "sheet" ? `/files/comparisons/${c.comparison_id}/${$("view").value}_${mode}.png` : null;
-    setImage("slider-left", url); if (!url) notice("差异图需要有效对比结果和单个视角。");
+    const url = ["success", "incomplete"].includes(c?.status) ? `/files/comparisons/${c.comparison_id}/${encodeURIComponent($("view").value)}_${mode}.png` : null;
+    setImage("slider-left", url);
+    if (!url && c?.status === "incompatible") notice("采集环境或相机构图不兼容，无法生成差异图。", true);
   }
+  document.querySelectorAll('[data-mode="diff"], [data-mode="heat"]').forEach(e => e.disabled = !canCompare());
   updateTransform();
 }
 $("view").onchange = () => { state.zoom = 1; state.pan = [0, 0]; renderImages(); };
@@ -127,7 +152,7 @@ for (const id of ["left-image", "right-image"]) $(id).ondblclick = event => {
   const view = capture.views[Math.floor(y / batch.profile.size) * batch.profile.columns + Math.floor(x / batch.profile.size)];
   if (view) { $("view").value = view.id; $("view").onchange(); }
 };
-document.querySelectorAll("[data-mode]").forEach(e => e.onclick = () => { state.mode = e.dataset.mode; document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === e)); renderImages(); });
+document.querySelectorAll("[data-mode]").forEach(e => e.onclick = () => safe(async () => { state.mode = e.dataset.mode; document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === e)); renderImages(); if (["diff", "heat"].includes(state.mode) && !state.comparison) await calculateComparison(); }));
 $("split").oninput = () => { $("slider-clip").style.clipPath = `inset(0 ${100 - Number($("split").value)}% 0 0)`; };
 function updateTransform() { const transform = `translate(${state.pan[0]}px, ${state.pan[1]}px) scale(${state.zoom})`; for (const id of ["left-image", "right-image", "slider-left", "slider-right"]) $(id).style.transform = transform; $("zoom-label").textContent = `${Math.round(state.zoom * 100)}%`; }
 $("zoom-in").onclick = () => { state.zoom = Math.min(8, state.zoom * 1.25); updateTransform(); }; $("zoom-out").onclick = () => { state.zoom = Math.max(.25, state.zoom / 1.25); updateTransform(); }; $("zoom-reset").onclick = () => { state.zoom = 1; state.pan = [0, 0]; updateTransform(); };

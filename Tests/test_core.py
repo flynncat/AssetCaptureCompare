@@ -76,10 +76,12 @@ class HistoryTests(unittest.TestCase):
         pixels[6:26, 6:26] = [80, 150, 200]
         if changed:
             pixels[12:20, 12:20] = [200, 100, 60]
-        Image.fromarray(pixels).save(directory / "views/front.png")
+        for view in self.profile["views"]:
+            Image.fromarray(pixels).save(directory / ("views/" + view["id"] + ".png"))
         value = dict(asset, status="success" if success else "failed", compatibility=compatibility, framing_id=framing,
                      framing={"center": [0, 0, 0], "distance": 100, "fov": 35},
-                     views=[{"id": "front", "file": "views/front.png", "roi": [4, 4, 28, 28]}])
+                     views=[{"id": v["id"], "file": "views/" + v["id"] + ".png", "roi": [4, 4, 28, 28]}
+                            for v in self.profile["views"]])
         contact_sheet(directory, value, self.profile)
         self.store.capture_path(asset["capture_id"]).parent.mkdir(parents=True, exist_ok=True)
         self.store.finish_asset(batch, asset, value, directory)
@@ -136,17 +138,39 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(image.mode, "RGB")
             self.assertEqual(image.getpixel((16, 16)), (30, 120, 200))
 
+    def test_cached_comparison_builds_missing_sheets_without_recomputing_ssim(self):
+        self.profile.update(columns=2, views=DEFAULT_PROFILE["views"][:3])
+        left, right = self.capture("/Game/X.X"), self.capture("/Game/X.X", changed=True)
+        comparer = Comparer(self.store)
+        comparison = comparer.compare(left, right)
+        directory = self.store.root / "comparisons" / comparison["comparison_id"]
+        self.assertFalse((directory / "sheet_diff.png").exists())
+        with patch("acc.compare.similarity", side_effect=AssertionError("Cached SSIM must be reused")):
+            self.assertEqual(comparer.compare(left, right, include_sheets=True), comparison)
+        for mode in ("diff", "heat"):
+            with Image.open(directory / ("sheet_" + mode + ".png")) as sheet:
+                self.assertEqual(sheet.size, (64, 64))
+                for index, view in enumerate(comparison["views"]):
+                    x, y = (index % 2) * 32, (index // 2) * 32
+                    with Image.open(directory / (view["id"] + "_" + mode + ".png")) as image:
+                        np.testing.assert_array_equal(np.asarray(sheet.crop((x, y, x + 32, y + 32))), np.asarray(image))
+                self.assertEqual(sheet.getpixel((48, 48)), (0, 0, 0))
+        (directory / "sheet_heat.png").unlink()
+        comparer.compare(left, right, include_sheets=True)
+        self.assertTrue((directory / "sheet_heat.png").is_file())
+
     def test_framing_and_environment_are_not_scored(self):
         first = self.capture("/Game/X.X")
         for value in (self.capture("/Game/X.X", framing="new"), self.capture("/Game/X.X", compatibility="new")):
-            result = Comparer(self.store).compare(first, value)
+            result = Comparer(self.store).compare(first, value, include_sheets=True)
             self.assertEqual(result["status"], "incompatible")
             self.assertNotIn("score", result)
+            self.assertFalse((self.store.root / "comparisons" / result["comparison_id"] / "sheet_diff.png").exists())
 
     def test_delete_invalidates_comparison_and_keeps_other_capture(self):
         first = self.capture("/Game/X.X")
         second = self.capture("/Game/X.X")
-        result = Comparer(self.store).compare(first, second)
+        result = Comparer(self.store).compare(first, second, include_sheets=True)
         self.store.delete_batch(first.split("/")[0])
         self.assertFalse((self.store.root / "comparisons" / result["comparison_id"]).exists())
         self.assertTrue(self.store.verify(self.store.capture(second)))
@@ -168,13 +192,14 @@ class HistoryTests(unittest.TestCase):
             capture = self.store.capture(capture_id)
             capture["views"].append(dict(capture["views"][0], id="right", roi=[15, 4, 16, 28]))
             write_json(self.store.capture_path(capture_id) / "capture.json", capture)
-        result = Comparer(self.store).compare(first, second)
+        result = Comparer(self.store).compare(first, second, include_sheets=True)
         self.assertEqual(result["status"], "incomplete")
         self.assertNotIn("score", result)
         self.assertEqual(result["invalid_views"], ["right"])
         self.assertEqual(result["views"][0]["score"], 1.0)
         self.assertIsNone(result["views"][1]["score"])
         self.assertTrue((self.store.root / "comparisons" / result["comparison_id"] / "right_heat.png").exists())
+        self.assertTrue((self.store.root / "comparisons" / result["comparison_id"] / "sheet_heat.png").exists())
 
     def test_unscorable_repeatability_requires_exact_verified_images(self):
         first, same = self.capture("/Game/X.X"), self.capture("/Game/X.X")
